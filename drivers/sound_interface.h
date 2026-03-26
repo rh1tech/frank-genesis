@@ -1,5 +1,5 @@
 /*
- * murmgenesis - Sound Chip Write Interface
+ * frank-genesis - Sound Chip Write Interface
  *
  * This module provides a unified interface for sound chip writes that can
  * either directly update the chips (legacy mode) or route through the

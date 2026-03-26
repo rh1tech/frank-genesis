@@ -1,5 +1,5 @@
 /*
- * murmgenesis - Simple DMA-based I2S Audio Driver for RP2350
+ * frank-genesis - Simple DMA-based I2S Audio Driver for RP2350
  * Based on pico-megadrive audio driver by Vincent Mistler
  * 
  * This is a much simpler approach than pico_audio_i2s:

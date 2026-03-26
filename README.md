@@ -1,4 +1,4 @@
-# MurmGenesis
+# FRANK Genesis
 
 Sega Genesis / Mega Drive emulator for Raspberry Pi Pico 2 (RP2350) with HDMI output, SD card, NES/SNES gamepad, and I2S audio.
 
@@ -6,8 +6,8 @@ Sega Genesis / Mega Drive emulator for Raspberry Pi Pico 2 (RP2350) with HDMI ou
 
 This firmware is designed for the following RP2350-based boards with integrated HDMI, SD card, and PSRAM:
 
-- **[Murmulator](https://murmulator.ru)** — A compact retro-computing platform based on RP Pico 2, designed for emulators and classic games.
 - **[FRANK](https://rh1.tech/projects/frank?area=about)** — A versatile development board based on RP Pico 2, HDMI output, and extensive I/O options.
+- **[Murmulator](https://murmulator.ru)** — A compact retro-computing platform based on RP Pico 2, designed for emulators and classic games.
 
 Both boards provide all necessary peripherals out of the box (no additional wiring required).
 
@@ -37,7 +37,7 @@ Both boards provide all necessary peripherals out of the box (no additional wiri
 
 ### PSRAM Options
 
-MurmGenesis requires 8MB PSRAM to run. You can obtain PSRAM-equipped hardware in several ways:
+FRANK Genesis requires 8MB PSRAM to run. You can obtain PSRAM-equipped hardware in several ways:
 
 1. **Solder a PSRAM chip** on top of the Flash chip on a Pico 2 clone (SOP-8 flash chips are only available on clones, not the original Pico 2)
 2. **Build a [Nyx 2](https://rh1.tech/projects/nyx?area=nyx2)** — a DIY RP2350 board with integrated PSRAM
@@ -165,8 +165,8 @@ When built with USB HID support (`-DUSB_HID_ENABLED=1`), USB keyboards are also 
 
 ```bash
 # Clone the repository with submodules
-git clone --recursive https://github.com/mmatveev/murmgenesis.git
-cd murmgenesis
+git clone --recursive https://github.com/mmatveev/frank-genesis.git
+cd frank-genesis
 
 # Or if already cloned, initialize submodules
 git submodule update --init --recursive
@@ -213,18 +213,18 @@ To build both M1 and M2 variants at multiple clock speeds:
 ```
 
 This creates versioned UF2 files in the `release/` directory:
-- `murmgenesis_m1_504_166_X_XX.uf2` — M1 layout, 504MHz CPU, 166MHz PSRAM
-- `murmgenesis_m2_378_133_X_XX.uf2` — M2 layout, 378MHz CPU, 133MHz PSRAM
+- `frank-genesis_m1_504_166_X_XX.uf2` — M1 layout, 504MHz CPU, 166MHz PSRAM
+- `frank-genesis_m2_378_133_X_XX.uf2` — M2 layout, 378MHz CPU, 133MHz PSRAM
 - etc.
 
 ### Flashing
 
 ```bash
 # With device in BOOTSEL mode:
-picotool load build/murmgenesis.uf2
+picotool load build/frank-genesis.uf2
 
 # Or with device running:
-picotool load -f build/murmgenesis.uf2
+picotool load -f build/frank-genesis.uf2
 ```
 
 Or use the flash script:

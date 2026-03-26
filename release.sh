@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# release.sh - Build all release variants of murmgenesis
+# release.sh - Build all release variants of frank-genesis
 #
 # Creates UF2 files for each board variant (M1, M2) at each clock speed:
 #   - Medium overclock: 378 MHz CPU, 133 MHz PSRAM
 #   - Max overclock: 504 MHz CPU, 166 MHz PSRAM
 #
-# Output format: murmgenesis_mX_Y_Z_A_BB.uf2
+# Output format: frank-genesis_mX_Y_Z_A_BB.uf2
 #   X  = Board variant (1 or 2)
 #   Y  = CPU clock in MHz
 #   Z  = PSRAM clock in MHz (target)
@@ -37,26 +37,31 @@ else
     LAST_MINOR=0
 fi
 
-# Calculate next version (for default suggestion)
-NEXT_MINOR=$((LAST_MINOR + 1))
-NEXT_MAJOR=$LAST_MAJOR
-if [[ $NEXT_MINOR -ge 100 ]]; then
-    NEXT_MAJOR=$((NEXT_MAJOR + 1))
-    NEXT_MINOR=0
+# Check for command-line version argument
+if [[ -n "$1" ]]; then
+    INPUT_VERSION="$1"
+else
+    # Calculate next version (for default suggestion)
+    NEXT_MINOR=$((LAST_MINOR + 1))
+    NEXT_MAJOR=$LAST_MAJOR
+    if [[ $NEXT_MINOR -ge 100 ]]; then
+        NEXT_MAJOR=$((NEXT_MAJOR + 1))
+        NEXT_MINOR=0
+    fi
+
+    # Interactive version input
+    echo ""
+    echo -e "${CYAN}┌─────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│                 FRANK Genesis Release Builder                   │${NC}"
+    echo -e "${CYAN}└─────────────────────────────────────────────────────────────────┘${NC}"
+    echo ""
+    echo -e "Last version: ${YELLOW}${LAST_MAJOR}.$(printf '%02d' $LAST_MINOR)${NC}"
+    echo ""
+
+    DEFAULT_VERSION="${NEXT_MAJOR}.$(printf '%02d' $NEXT_MINOR)"
+    read -p "Enter version [default: $DEFAULT_VERSION]: " INPUT_VERSION
+    INPUT_VERSION=${INPUT_VERSION:-$DEFAULT_VERSION}
 fi
-
-# Interactive version input
-echo ""
-echo -e "${CYAN}┌─────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│                   murmgenesis Release Builder                   │${NC}"
-echo -e "${CYAN}└─────────────────────────────────────────────────────────────────┘${NC}"
-echo ""
-echo -e "Last version: ${YELLOW}${LAST_MAJOR}.$(printf '%02d' $LAST_MINOR)${NC}"
-echo ""
-
-DEFAULT_VERSION="${NEXT_MAJOR}.$(printf '%02d' $NEXT_MINOR)"
-read -p "Enter version [default: $DEFAULT_VERSION]: " INPUT_VERSION
-INPUT_VERSION=${INPUT_VERSION:-$DEFAULT_VERSION}
 
 # Parse version (handle both "1.00" and "1 00" formats)
 if [[ "$INPUT_VERSION" == *"."* ]]; then
@@ -109,36 +114,36 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 for config in "${CONFIGS[@]}"; do
     read -r BOARD CPU PSRAM DESC <<< "$config"
-    
+
     BUILD_COUNT=$((BUILD_COUNT + 1))
-    
+
     # Board variant number
     if [[ "$BOARD" == "M1" ]]; then
         BOARD_NUM=1
     else
         BOARD_NUM=2
     fi
-    
+
     # Output filename
-    OUTPUT_NAME="murmgenesis_m${BOARD_NUM}_${CPU}_${PSRAM}_${VERSION}.uf2"
-    
+    OUTPUT_NAME="frank-genesis_m${BOARD_NUM}_${CPU}_${PSRAM}_${VERSION}.uf2"
+
     echo ""
     echo -e "${CYAN}[$BUILD_COUNT/$TOTAL_BUILDS] Building: $OUTPUT_NAME${NC}"
     echo -e "  Board: $BOARD | CPU: ${CPU} MHz | PSRAM: ${PSRAM} MHz | $DESC"
-    
+
     # Clean and create build directory
     rm -rf build
     mkdir build
     cd build
-    
+
     # Configure with CMake (USB HID enabled, logging disabled for release)
     cmake .. -DBOARD_VARIANT="$BOARD" -DCPU_SPEED="$CPU" -DPSRAM_SPEED="$PSRAM" -DUSB_HID_ENABLED=1 -DENABLE_LOGGING=0 > /dev/null 2>&1
-    
+
     # Build
     if make -j8 > /dev/null 2>&1; then
         # Copy UF2 to release directory
-        if [[ -f "murmgenesis.uf2" ]]; then
-            cp "murmgenesis.uf2" "$RELEASE_DIR/$OUTPUT_NAME"
+        if [[ -f "frank-genesis.uf2" ]]; then
+            cp "frank-genesis.uf2" "$RELEASE_DIR/$OUTPUT_NAME"
             echo -e "  ${GREEN}✓ Success${NC} → release/$OUTPUT_NAME"
         else
             echo -e "  ${RED}✗ UF2 not found${NC}"
@@ -146,7 +151,7 @@ for config in "${CONFIGS[@]}"; do
     else
         echo -e "  ${RED}✗ Build failed${NC}"
     fi
-    
+
     cd "$SCRIPT_DIR"
 done
 
@@ -159,6 +164,6 @@ echo -e "${GREEN}Release build complete!${NC}"
 echo ""
 echo "Release files in: $RELEASE_DIR/"
 echo ""
-ls -la "$RELEASE_DIR"/murmgenesis_*_${VERSION}.uf2 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}'
+ls -la "$RELEASE_DIR"/frank-genesis_*_${VERSION}.uf2 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}'
 echo ""
 echo -e "Version: ${CYAN}${MAJOR}.$(printf '%02d' $MINOR)${NC}"

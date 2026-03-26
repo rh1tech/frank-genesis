@@ -1,5 +1,5 @@
 /*
- * ROM Selector - Start screen for murmgenesis
+ * ROM Selector - Start screen for frank-genesis
  * Allows user to browse and select Genesis/Megadrive ROMs from SD card
  */
 #ifndef ROM_SELECTOR_H

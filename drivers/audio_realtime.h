@@ -1,5 +1,5 @@
 /*
- * murmgenesis - Autonomous Real-Time Audio System
+ * frank-genesis - Autonomous Real-Time Audio System
  *
  * This module implements a fully autonomous audio system where:
  * - Core 1 runs sound chip emulation and audio generation independently

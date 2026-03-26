@@ -1,5 +1,5 @@
 /*
- * Settings Menu - Runtime configuration for murmgenesis
+ * Settings Menu - Runtime configuration for frank-genesis
  * Allows user to adjust CPU/PSRAM frequencies, audio, and display options
  */
 #ifndef SETTINGS_H

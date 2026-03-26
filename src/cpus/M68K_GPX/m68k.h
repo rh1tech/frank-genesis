@@ -43,7 +43,7 @@
     - improved auto-vectored interrupts acknowledge cycle timing accuracy
     - improved MOVEM instruction accuracy (implements extra read cycle from memory as verified on real hardware)
 
-    Adapted for murmgenesis:
+    Adapted for frank-genesis:
     - Removed Mega-CD (s68k) support
     - Adapted for RP2350 Pico SDK
   */
@@ -56,7 +56,7 @@
 #include "macros.h"
 
 /* ======================================================================== */
-/* ==================== MURMGENESIS MEMORY INTERFACE ====================== */
+/* ==================== FRANK-GENESIS MEMORY INTERFACE ====================== */
 /* ======================================================================== */
 
 /* ROM and RAM data pointers (defined in gwenesis_bus.c) */
@@ -436,7 +436,7 @@ extern unsigned int m68k_get_reg(m68k_register_t reg);
 /* Poke values into the internals of the currently running CPU context */
 extern void m68k_set_reg(m68k_register_t reg, unsigned int value);
 
-/* Save/Load state functions (murmgenesis specific) */
+/* Save/Load state functions (frank-genesis specific) */
 extern void gwenesis_m68k_save_state(void);
 extern void gwenesis_m68k_load_state(void);
 

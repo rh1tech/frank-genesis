@@ -1,5 +1,5 @@
 /*
- * murmgenesis - Autonomous Real-Time Audio System with Independent Timing
+ * frank-genesis - Autonomous Real-Time Audio System with Independent Timing
  *
  * This module implements a fully autonomous audio system where:
  * - Core 1 runs its own hardware timer for audio sample generation

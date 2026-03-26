@@ -1,6 +1,6 @@
 /*****************************************************************************
  * z80.h - Genesis-Plus-GX Z80 CPU core header
- * Ported for murmgenesis as alternative Z80 implementation
+ * Ported for frank-genesis as alternative Z80 implementation
  *****************************************************************************/
 
 #ifndef Z80_GPX_H_

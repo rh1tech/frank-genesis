@@ -851,7 +851,7 @@ INLINE uint m68ki_read_imm_32(void)
  * These functions will also check for address error and set the function
  * code if they are enabled in m68kconf.h.
  *
- * Murmgenesis: Use FETCH-based macros instead of memory_map for direct access
+ * frank-genesis: Use FETCH-based macros instead of memory_map for direct access
  * Optimized: ADDRESS_68K called once, fast-path inlined
  */
 INLINE uint m68ki_read_8(uint address)

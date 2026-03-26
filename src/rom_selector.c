@@ -16,8 +16,8 @@
 #include <string.h>
 #include <stdio.h>
 
-#ifndef MURMGENESIS_VERSION
-#define MURMGENESIS_VERSION "?"
+#ifndef FRANK_GENESIS_VERSION
+#define FRANK_GENESIS_VERSION "?"
 #endif
 
 // USB HID gamepad support
@@ -89,27 +89,29 @@ static void draw_warning_splash(uint8_t *screen);
 static const uint8_t *glyph_bold(char ch) {
     // 7-pixel wide, 9-pixel tall bold glyphs
     static const uint8_t glyph_space[9] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    static const uint8_t glyph_M[9] = {0x63, 0x77, 0x7F, 0x6B, 0x63, 0x63, 0x63, 0x63, 0x63};
-    static const uint8_t glyph_U[9] = {0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x77, 0x3E};
-    static const uint8_t glyph_R[9] = {0x7E, 0x63, 0x63, 0x63, 0x7E, 0x6C, 0x66, 0x63, 0x63};
-    static const uint8_t glyph_G[9] = {0x3E, 0x63, 0x60, 0x60, 0x6F, 0x63, 0x63, 0x63, 0x3E};
+    static const uint8_t glyph_A[9] = {0x1C, 0x36, 0x63, 0x63, 0x7F, 0x63, 0x63, 0x63, 0x63};
     static const uint8_t glyph_E[9] = {0x7F, 0x60, 0x60, 0x60, 0x7E, 0x60, 0x60, 0x60, 0x7F};
-    static const uint8_t glyph_N[9] = {0x63, 0x73, 0x7B, 0x7F, 0x6F, 0x67, 0x63, 0x63, 0x63};
-    static const uint8_t glyph_S[9] = {0x3E, 0x63, 0x60, 0x70, 0x3E, 0x07, 0x03, 0x63, 0x3E};
+    static const uint8_t glyph_F[9] = {0x7F, 0x60, 0x60, 0x60, 0x7E, 0x60, 0x60, 0x60, 0x60};
+    static const uint8_t glyph_G[9] = {0x3E, 0x63, 0x60, 0x60, 0x6F, 0x63, 0x63, 0x63, 0x3E};
     static const uint8_t glyph_I[9] = {0x3E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3E};
+    static const uint8_t glyph_K[9] = {0x63, 0x66, 0x6C, 0x78, 0x70, 0x78, 0x6C, 0x66, 0x63};
+    static const uint8_t glyph_N[9] = {0x63, 0x73, 0x7B, 0x7F, 0x6F, 0x67, 0x63, 0x63, 0x63};
+    static const uint8_t glyph_R[9] = {0x7E, 0x63, 0x63, 0x63, 0x7E, 0x6C, 0x66, 0x63, 0x63};
+    static const uint8_t glyph_S[9] = {0x3E, 0x63, 0x60, 0x70, 0x3E, 0x07, 0x03, 0x63, 0x3E};
 
     int c = (unsigned char)ch;
     if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
     
     switch (c) {
-        case 'M': return glyph_M;
-        case 'U': return glyph_U;
-        case 'R': return glyph_R;
-        case 'G': return glyph_G;
+        case 'A': return glyph_A;
         case 'E': return glyph_E;
-        case 'N': return glyph_N;
-        case 'S': return glyph_S;
+        case 'F': return glyph_F;
+        case 'G': return glyph_G;
         case 'I': return glyph_I;
+        case 'K': return glyph_K;
+        case 'N': return glyph_N;
+        case 'R': return glyph_R;
+        case 'S': return glyph_S;
         default: return glyph_space;
     }
 }
@@ -289,7 +291,7 @@ static void fill_rect(uint8_t *screen, int x, int y, int w, int h, uint8_t color
 
 static void draw_demostyle_header(uint8_t *screen, uint32_t phase) {
     // Calculate title dimensions first to exclude from animation
-    const char *title = "MURMGENESIS";
+    const char *title = "FRANK GENESIS";
     int title_width = (int)strlen(title) * BOLD_FONT_WIDTH;
     int title_x = (SCREEN_WIDTH - title_width) / 2;
     int title_y = HEADER_Y + (HEADER_HEIGHT - BOLD_FONT_HEIGHT) / 2;
@@ -371,7 +373,7 @@ static void draw_info_text(uint8_t *screen) {
     // PSRAM clock: show the configured max frequency from settings
     uint32_t psram_mhz = g_settings.psram_freq;
 
-    snprintf(info_str, sizeof(info_str), "V%s %s %u MHZ/%u MHZ", MURMGENESIS_VERSION, board_str, cpu_mhz, psram_mhz);
+    snprintf(info_str, sizeof(info_str), "V%s %s %u MHZ/%u MHZ", FRANK_GENESIS_VERSION, board_str, cpu_mhz, psram_mhz);
 
     // Center with 5x7 font metrics
     int text_width = (int)(strlen(info_str) * FONT_WIDTH);

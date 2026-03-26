@@ -1,5 +1,5 @@
 /*
- * murmgenesis - I2S Audio Driver with Chained Double Buffer DMA
+ * frank-genesis - I2S Audio Driver with Chained Double Buffer DMA
  *
  * Uses two DMA channels in ping-pong configuration:
  * - Channel A plays buffer 0, then triggers channel B

@@ -1,5 +1,5 @@
 /*
- * murmgenesis - Sound Chip Write Wrappers
+ * frank-genesis - Sound Chip Write Wrappers
  *
  * When AUDIO_USE_REALTIME=1, these wrappers intercept sound chip writes
  * and route them to the Core 1 command queue for autonomous processing.

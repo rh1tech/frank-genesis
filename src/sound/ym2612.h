@@ -10,7 +10,7 @@
 ** Version 1.4 (final beta)
 **
 ** Additional code & fixes by Eke-Eke for Genesis Plus GX
-** Ported to murmgenesis with Genesis-Plus-GX improvements
+** Ported to frank-genesis with Genesis-Plus-GX improvements
 **
 */
 

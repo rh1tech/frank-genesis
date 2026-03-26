@@ -56,27 +56,16 @@ message(STATUS "Board: ${BOARD_VARIANT}, CPU: ${CPU_SPEED} MHz, PSRAM: ${PSRAM_S
 
 include(pico_sdk_import.cmake)
 
-# Import pico-extras for audio_i2s library
-set(PICO_EXTRAS_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-extras CACHE PATH "Path to pico-extras")
-if(EXISTS ${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
-    include(${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
-endif()
-
-project(murmgenesis C CXX ASM)
+project(frank-genesis C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
 # Inject version.txt as a compile-time string.
-file(READ "${CMAKE_CURRENT_LIST_DIR}/version.txt" MURMGENESIS_VERSION_RAW)
-string(STRIP "${MURMGENESIS_VERSION_RAW}" MURMGENESIS_VERSION_RAW)
-string(REGEX REPLACE "[ \t]+" "." MURMGENESIS_VERSION "${MURMGENESIS_VERSION_RAW}")
+file(READ "${CMAKE_CURRENT_LIST_DIR}/version.txt" FRANK_GENESIS_VERSION_RAW)
+string(STRIP "${FRANK_GENESIS_VERSION_RAW}" FRANK_GENESIS_VERSION_RAW)
+string(REGEX REPLACE "[ \t]+" "." FRANK_GENESIS_VERSION "${FRANK_GENESIS_VERSION_RAW}")
 
 pico_sdk_init()
-
-# Initialize pico-extras if available
-if(COMMAND pico_extras_init)
-    pico_extras_init()
-endif()
 
 # Add fatfs
 add_subdirectory(src/fatfs)
@@ -173,14 +162,14 @@ set_source_files_properties(src/cpus/Z80_GPX/z80_gpx.c PROPERTIES
     COMPILE_FLAGS "-O3 -ffast-math -funroll-loops -finline-functions"
 )
 
-add_executable(murmgenesis
+add_executable(frank-genesis
     src/main.c
     src/rom_selector.c
     src/settings.c
     ${GWENESIS_SOURCES}
 )
 
-target_include_directories(murmgenesis PRIVATE
+target_include_directories(frank-genesis PRIVATE
     src
     src/bus
     ${M68K_INCLUDE_DIR}
@@ -194,13 +183,13 @@ target_include_directories(murmgenesis PRIVATE
     drivers/sdcard
 )
 
-target_compile_definitions(murmgenesis PRIVATE
+target_compile_definitions(frank-genesis PRIVATE
     BOARD_${BOARD_VARIANT}
     CPU_CLOCK_MHZ=${CPU_SPEED}
     CPU_VOLTAGE=${CPU_VOLTAGE}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
     PICO_ON_DEVICE=1
-    MURMGENESIS_VERSION="${MURMGENESIS_VERSION}"
+    FRANK_GENESIS_VERSION="${FRANK_GENESIS_VERSION}"
     # Gwenesis configuration
     ROM_SWAP=0
     BUS_DISABLE_LOGGING=1
@@ -219,7 +208,7 @@ target_compile_definitions(murmgenesis PRIVATE
 
 # Set peripheral pins based on board variant
 if(BOARD_VARIANT STREQUAL "M1")
-    target_compile_definitions(murmgenesis PRIVATE
+    target_compile_definitions(frank-genesis PRIVATE
         # I2S Audio
         PICO_AUDIO_I2S_DATA_PIN=26
         PICO_AUDIO_I2S_CLOCK_PIN_BASE=27
@@ -234,7 +223,7 @@ if(BOARD_VARIANT STREQUAL "M1")
         NESPAD_GPIO_DATA=16
     )
 elseif(BOARD_VARIANT STREQUAL "M2")
-    target_compile_definitions(murmgenesis PRIVATE
+    target_compile_definitions(frank-genesis PRIVATE
         # I2S Audio
         PICO_AUDIO_I2S_DATA_PIN=9
         PICO_AUDIO_I2S_CLOCK_PIN_BASE=10
@@ -250,7 +239,7 @@ elseif(BOARD_VARIANT STREQUAL "M2")
     )
 endif()
 
-target_link_libraries(murmgenesis
+target_link_libraries(frank-genesis
     pico_stdlib
     pico_multicore
     hardware_spi
@@ -268,17 +257,17 @@ target_link_libraries(murmgenesis
 # USB configuration: stdio vs HID Host (mutually exclusive)
 if(USB_HID_ENABLED)
     # USB HID Host mode - disable USB stdio, use UART instead
-    pico_enable_stdio_usb(murmgenesis 0)
-    pico_enable_stdio_uart(murmgenesis 1)
+    pico_enable_stdio_usb(frank-genesis 0)
+    pico_enable_stdio_uart(frank-genesis 1)
     message(STATUS "USB HID Host enabled - using UART for stdio")
     
     # Add USB HID driver
     add_subdirectory(drivers/usbhid)
-    target_link_libraries(murmgenesis usbhid)
+    target_link_libraries(frank-genesis usbhid)
 else()
     # USB Device mode for stdio
-    pico_enable_stdio_usb(murmgenesis 1)
-    pico_enable_stdio_uart(murmgenesis 0)
+    pico_enable_stdio_usb(frank-genesis 1)
+    pico_enable_stdio_uart(frank-genesis 0)
 endif()
 
-pico_add_extra_outputs(murmgenesis)
+pico_add_extra_outputs(frank-genesis)

@@ -1,5 +1,5 @@
 /*
- * murmgenesis - Sega Genesis/Megadrive Emulator for RP2350
+ * frank-genesis - Sega Genesis/Megadrive Emulator for RP2350
  * Based on Gwenesis emulator
  */
 #include "pico/stdlib.h"
@@ -1111,7 +1111,7 @@ int main(void) {
     
     LOG("\n\n");
     LOG("========================================\n");
-    LOG("   murmgenesis - Genesis for RP2350\n");
+    LOG("   FRANK Genesis - Genesis for RP2350\n");
     LOG("========================================\n");
     LOG("System Clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
     

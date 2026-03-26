@@ -877,7 +877,7 @@ bool settings_save(void) {
     
     // Write settings in INI format
     snprintf(buf, sizeof(buf),
-        "; MurmGenesis Settings\n"
+        "; FRANK Genesis Settings\n"
         "; This file is auto-generated. Edit with care.\n"
         "\n"
         "cpu_freq = %d\n"

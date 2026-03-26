@@ -1,5 +1,5 @@
 /*
-Genesis-Plus-GX Z80 CPU integration for murmgenesis
+Genesis-Plus-GX Z80 CPU integration for frank-genesis
 Alternative Z80 implementation using the GPX core
 
 *** EXPERIMENTAL - Use Z80_CORE=GPX to enable ***

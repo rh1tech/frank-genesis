@@ -1,5 +1,5 @@
 /*
- * clownmdemu sound wrapper for murmgenesis
+ * clownmdemu sound wrapper for frank-genesis
  * 
  * Alternative sound system using clownmdemu's accurate FM/PSG implementation.
  * Enable with SOUND_ENGINE=CLOWNMDEMU in CMake.

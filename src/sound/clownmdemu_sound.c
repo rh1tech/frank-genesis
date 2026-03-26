@@ -1,5 +1,5 @@
 /*
- * clownmdemu sound wrapper for murmgenesis
+ * clownmdemu sound wrapper for frank-genesis
  * 
  * Alternative sound system using clownmdemu's accurate FM/PSG implementation.
  * This provides cycle-accurate YM2612 and SN76489 emulation.

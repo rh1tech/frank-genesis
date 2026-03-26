@@ -1,7 +1,7 @@
 /*******************************************************************************
 *                                                                              *
 *  Define size independent data types and operations.                          *
-*  Ported from Genesis-Plus-GX for murmgenesis                                 *
+*  Ported from Genesis-Plus-GX for frank-genesis                                 *
 *                                                                              *
 *******************************************************************************/
 

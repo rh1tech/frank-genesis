@@ -124,10 +124,10 @@
  *    to a detailed description by Sean Young which can be found at:
  *      http://www.msxnet.org/tech/z80-documented.pdf
  *
- *   Ported to murmgenesis as alternative Z80 implementation
+ *   Ported to frank-genesis as alternative Z80 implementation
  *****************************************************************************/
 
-/* Standalone includes for murmgenesis port */
+/* Standalone includes for frank-genesis port */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
