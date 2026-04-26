@@ -848,7 +848,16 @@ static void __time_critical_func(emulation_loop)(void) {
             PROFILE_END(m68k_time);
             
             // Run Z80 in chunks of scanlines to reduce call overhead.
-            if (((scan_line % Z80_SLICE_LINES) == (Z80_SLICE_LINES - 1)) || (scan_line == (lines_per_frame - 1))) {
+            // Always run on VBlank IRQ edges (screen_height-1 and screen_height)
+            // so the Z80 sees the vblank IRQ while asserted. Music drivers in
+            // games like Comix Zone and Aladdin tick on this IRQ; missing it
+            // silences or desyncs music.
+            bool z80_run_due =
+                ((scan_line % Z80_SLICE_LINES) == (Z80_SLICE_LINES - 1)) ||
+                (scan_line == (lines_per_frame - 1)) ||
+                (scan_line == (screen_height - 1)) ||
+                (scan_line == screen_height);
+            if (z80_run_due) {
                 PROFILE_START();
                 z80_run(system_clock + VDP_CYCLES_PER_LINE);
                 PROFILE_END(z80_time);
