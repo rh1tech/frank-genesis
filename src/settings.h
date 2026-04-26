@@ -21,6 +21,11 @@ typedef struct {
     uint8_t channel_mask;   // Channel enable bitmask: bits 0-5 = FM 1-6, bit 6 = PSG
     uint8_t frameskip;      // Frameskip level: 0=none, 1=low, 2=medium, 3=high (default), 4=extreme
     uint8_t gamepad2_mode;  // Gamepad 2 mode: 0=NES, 1=keyboard, 2=USB, 3=disabled
+
+    // File-browser persistence: last visited directory and selected file.
+    // Used so the browser reopens where the user left off across cold boots.
+    char browser_path[128];
+    char browser_file[96];
 } settings_t;
 
 // Gamepad 2 mode values

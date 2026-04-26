@@ -1208,7 +1208,11 @@ int main(void) {
     // Ensure we don't briefly display uninitialized pixels with the new palette
     // Use index 1 instead of 0 - index 0 causes HDMI issues at 378MHz
     memset(SCREEN, 1, sizeof(SCREEN));
-    
+
+    // Welcome splash before we touch the SD card — gives the capture card /
+    // HDMI a moment to settle and lets the user see we're alive.
+    welcome_screen_show((uint8_t *)SCREEN);
+
     // Now mount SD card (after graphics init so we can show errors)
     LOG("Mounting SD card...\n");
     FRESULT res = f_mount(&fs, "", 1);

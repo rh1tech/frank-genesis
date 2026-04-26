@@ -88,7 +88,9 @@ settings_t g_settings = {
     .audio_enabled = true,
     .channel_mask = 0x7F,  // All 7 channels enabled (bits 0-6)
     .frameskip = 3,  // Default: high (30fps)
-    .gamepad2_mode = GAMEPAD2_MODE_NES  // Default: NES gamepad 2
+    .gamepad2_mode = GAMEPAD2_MODE_NES,  // Default: NES gamepad 2
+    .browser_path = {0},
+    .browser_file = {0}
 };
 
 // Frameskip level names
@@ -769,6 +771,8 @@ void settings_load(void) {
     g_settings.channel_mask = 0x7F;  // All channels on
     g_settings.frameskip = 3;  // Default: high
     g_settings.gamepad2_mode = GAMEPAD2_MODE_NES;  // Default: NES
+    g_settings.browser_path[0] = '\0';
+    g_settings.browser_file[0] = '\0';
     
     FRESULT res = f_open(&file, "/genesis/settings.ini", FA_READ);
     if (res != FR_OK) {
@@ -857,6 +861,14 @@ void settings_load(void) {
                 g_settings.gamepad2_mode = GAMEPAD2_MODE_DISABLED;
             }
         }
+        else if (parse_ini_line(line, "browser_path", value, sizeof(value))) {
+            strncpy(g_settings.browser_path, value, sizeof(g_settings.browser_path) - 1);
+            g_settings.browser_path[sizeof(g_settings.browser_path) - 1] = '\0';
+        }
+        else if (parse_ini_line(line, "browser_file", value, sizeof(value))) {
+            strncpy(g_settings.browser_file, value, sizeof(g_settings.browser_file) - 1);
+            g_settings.browser_file[sizeof(g_settings.browser_file) - 1] = '\0';
+        }
     }
     
     f_close(&file);
@@ -865,18 +877,18 @@ void settings_load(void) {
 bool settings_save(void) {
     FIL file;
     UINT bw;
-    char buf[512];
-    
+    char buf[768];
+
     // Ensure genesis directory exists
     f_mkdir("/genesis");
-    
+
     FRESULT res = f_open(&file, "/genesis/settings.ini", FA_WRITE | FA_CREATE_ALWAYS);
     if (res != FR_OK) {
         return false;
     }
-    
+
     // Write settings in INI format
-    snprintf(buf, sizeof(buf),
+    int written = snprintf(buf, sizeof(buf),
         "; FRANK Genesis Settings\n"
         "; This file is auto-generated. Edit with care.\n"
         "\n"
@@ -897,7 +909,11 @@ bool settings_save(void) {
         "channel_4 = %s\n"
         "channel_5 = %s\n"
         "channel_6 = %s\n"
-        "psg = %s\n",
+        "psg = %s\n"
+        "\n"
+        "; File browser state (auto-saved; do not edit manually)\n"
+        "browser_path = %s\n"
+        "browser_file = %s\n",
         g_settings.cpu_freq,
         g_settings.psram_freq,
         g_settings.z80_enabled ? "on" : "off",
@@ -913,12 +929,19 @@ bool settings_save(void) {
         CHANNEL_ENABLED(g_settings.channel_mask, 3) ? "on" : "off",
         CHANNEL_ENABLED(g_settings.channel_mask, 4) ? "on" : "off",
         CHANNEL_ENABLED(g_settings.channel_mask, 5) ? "on" : "off",
-        CHANNEL_ENABLED(g_settings.channel_mask, 6) ? "on" : "off");
-    
-    res = f_write(&file, buf, strlen(buf), &bw);
+        CHANNEL_ENABLED(g_settings.channel_mask, 6) ? "on" : "off",
+        g_settings.browser_path,
+        g_settings.browser_file);
+
+    if (written < 0 || (size_t)written >= sizeof(buf)) {
+        f_close(&file);
+        return false;
+    }
+
+    res = f_write(&file, buf, (UINT)written, &bw);
     f_close(&file);
-    
-    return (res == FR_OK && bw == strlen(buf));
+
+    return (res == FR_OK && bw == (UINT)written);
 }
 
 // External audio control flags from main.c and ym2612.c
