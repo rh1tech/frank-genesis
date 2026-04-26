@@ -3,14 +3,18 @@ rm -rf ./build
 mkdir build
 cd build
 
+# Always build for M2 board variant by default.
+BOARD_VARIANT="${BOARD_VARIANT:-M2}"
+
 # USB HID support is enabled by default. Set USB_HID_ENABLED=0 to disable.
-CMAKE_OPTS="-DPICO_PLATFORM=rp2350 -DUSB_HID_ENABLED=1"
+CMAKE_OPTS="-DPICO_PLATFORM=rp2350 -DBOARD_VARIANT=${BOARD_VARIANT} -DUSB_HID_ENABLED=1"
 if [ "$USB_HID_ENABLED" = "0" ]; then
-    CMAKE_OPTS="-DPICO_PLATFORM=rp2350"
+    CMAKE_OPTS="-DPICO_PLATFORM=rp2350 -DBOARD_VARIANT=${BOARD_VARIANT}"
     echo "Building WITHOUT USB HID Host support (USB for debug output)"
 else
     echo "Building with USB HID Host support (UART for debug output)"
 fi
+echo "BOARD_VARIANT=${BOARD_VARIANT}"
 
 # Optional tuning: run Z80 every N scanlines (more aggressive = larger N)
 if [ -n "$Z80_SLICE_LINES" ]; then
