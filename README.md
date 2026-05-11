@@ -2,6 +2,13 @@
 
 Sega Genesis / Mega Drive emulator for Raspberry Pi Pico 2 (RP2350) with HDMI output, SD card, NES/SNES gamepad, and I2S audio.
 
+## Screenshots
+
+| | |
+|:---:|:---:|
+| ![Boot screen](screenshots/screen1.png) | ![Gameplay](screenshots/screen2.png) |
+| ![Strategy game](screenshots/screen3.png) | ![Aladdin](screenshots/screen4.png) |
+
 ## Supported Boards
 
 This firmware is designed for the following RP2350-based boards with integrated HDMI, SD card, and PSRAM:
