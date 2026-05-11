@@ -373,7 +373,9 @@ unsigned int frame_counter = 0;
 static FATFS fs;
 
 // Flash timing configuration for overclocking
+#ifndef FLASH_MAX_FREQ_MHZ
 #define FLASH_MAX_FREQ_MHZ 88
+#endif
 
 static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz) {
     const int clock_hz = cpu_mhz * 1000000;
