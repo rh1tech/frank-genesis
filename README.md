@@ -1,5 +1,7 @@
 # FRANK Genesis
 
+Official page: **[frank.rh1.tech](https://frank.rh1.tech/)** — hub for all FRANK boards and firmware.
+
 Sega Genesis / Mega Drive emulator for Raspberry Pi Pico 2 (RP2350) with HDMI output, SD card, NES/SNES gamepad, and I2S audio.
 
 ## Screenshots
