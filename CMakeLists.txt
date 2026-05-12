@@ -1,16 +1,31 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0-a4)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
 cmake_minimum_required(VERSION 3.13)
 
 # Set board to Pico 2 (RP2350)
 set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 
 # Board configuration variant (M1, M2)
-set(BOARD_VARIANT "M1" CACHE STRING "Board variant: M1 or M2")
+set(BOARD_VARIANT "M2" CACHE STRING "Board variant: M1 or M2")
 
 # CPU overclock configuration (252, 378, 504 MHz)
 set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 252, 378, 504")
 
 # PSRAM speed configuration (84, 100, 133, 166 MHz target)
-set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 84, 100, 133, 166")
+set(PSRAM_SPEED "100")
+set(FLASH_SPEED "66")
 
 # Z80 scheduling: run the Z80 core less often to reduce interpreter overhead.
 # Higher values generally improve performance but can reduce timing fidelity for
@@ -188,6 +203,7 @@ target_compile_definitions(frank-genesis PRIVATE
     CPU_CLOCK_MHZ=${CPU_SPEED}
     CPU_VOLTAGE=${CPU_VOLTAGE}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
+    FLASH_MAX_FREQ_MHZ=${FLASH_SPEED}
     PICO_ON_DEVICE=1
     FRANK_GENESIS_VERSION="${FRANK_GENESIS_VERSION}"
     # Gwenesis configuration

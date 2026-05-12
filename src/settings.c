@@ -79,7 +79,7 @@ typedef enum {
 // Global settings instance
 settings_t g_settings = {
     .cpu_freq = 504,
-    .psram_freq = 166,
+    .psram_freq = PSRAM_MAX_FREQ_MHZ,
     .fm_sound = true,
     .dac_sound = true,
     .crt_effect = false,
@@ -356,8 +356,12 @@ static void change_setting(menu_item_t item, int direction) {
         case MENU_PSRAM_FREQ:
             if (direction < 0 && edit_settings.psram_freq == 166) {
                 edit_settings.psram_freq = 133;
+            } else if (direction < 0 && edit_settings.psram_freq == 133) {
+                edit_settings.psram_freq = 100;
             } else if (direction > 0 && edit_settings.psram_freq == 133) {
                 edit_settings.psram_freq = 166;
+            } else if (direction > 0 && edit_settings.psram_freq == 100) {
+                edit_settings.psram_freq = 133;
             }
             break;
             
@@ -761,7 +765,7 @@ void settings_load(void) {
     
     // Set defaults first
     g_settings.cpu_freq = 504;
-    g_settings.psram_freq = 166;
+    g_settings.psram_freq = PSRAM_MAX_FREQ_MHZ;
     g_settings.fm_sound = true;
     g_settings.dac_sound = true;
     g_settings.crt_effect = false;
@@ -793,7 +797,7 @@ void settings_load(void) {
         }
         else if (parse_ini_line(line, "psram_freq", value, sizeof(value))) {
             int freq = atoi(value);
-            if (freq == 133 || freq == 166) {
+            if (freq == 100 || freq == 133 || freq == 166) {
                 g_settings.psram_freq = (uint16_t)freq;
             }
         }
