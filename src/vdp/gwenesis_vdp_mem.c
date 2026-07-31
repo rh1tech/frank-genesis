@@ -29,6 +29,7 @@ __license__ = "GPLv3"
 
 #include <assert.h>
 #include "gwenesis_sn76489.h"
+#include "sound_backend.h"
 #include "HDMI.h"
 
 #define RGB888(r, g, b) ((r << 16) | (g << 8) | b)
@@ -893,7 +894,7 @@ void gwenesis_vdp_write_memory_16(unsigned int address, unsigned int value) {
         // PSG 8 bits write
         vdpm_log(__FUNCTION__, "PSG sclk=%d,mclk=%d", system_clock, m68k_cycles_master());
         if(audio_enabled && sn76489_enabled)
-            gwenesis_SN76489_Write(value, m68k_cycles_master());
+            sound_psg_write(value, m68k_cycles_master());
         return;
     }
     // UNHANDLED - disabled spam

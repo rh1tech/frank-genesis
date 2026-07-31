@@ -26,6 +26,7 @@ __license__ = "GPLv3"
 
 #include "ym2612.h"
 #include "z80inst.h"
+#include "sound_backend.h"
 #include "gwenesis_bus.h"
 #include "gwenesis_io.h"
 #include "gwenesis_vdp.h"
@@ -478,14 +479,14 @@ static inline __attribute__((always_inline)) unsigned int gwenesis_bus_read_memo
     return gwenesis_io_read_ctrl(address & 0x1F);
 
   case Z80_CTRL:
-    return z80_read_ctrl(address & 0xFFFF);
+    return sound_z80_ctrl_read(address & 0xFFFF);
 
   case Z80_RAM_ADDR:
   case Z80_RAM_ADDR1K:
-    return ZRAM[address & 0x1FFF];
+    return sound_zram_read(address & 0x1FFF);
 
   case Z80_YM2612_ADDR:
-    return YM2612Read(m68k_cycles_master());
+    return sound_ym_read(m68k_cycles_master());
 
   case Z80_SN76489_ADDR:
     return 0xff;
@@ -537,16 +538,16 @@ static inline __attribute__((always_inline)) unsigned int gwenesis_bus_read_memo
   //  ret_value = z80_read_ctrl(address & 0xFFFF); 
    // return ret_value | ret_value << 8;
     address &=0xFFFF;
-        return (z80_read_ctrl(address) << 8) | z80_read_ctrl(address | 1);
+        return (sound_z80_ctrl_read(address) << 8) | sound_z80_ctrl_read(address | 1);
 
 
   case Z80_RAM_ADDR:
   case Z80_RAM_ADDR1K:
-    return ZRAM[address & 0X1FFF] | (ZRAM[address & 0X1FFF] << 8);
+    return sound_zram_read(address & 0X1FFF) | (sound_zram_read(address & 0X1FFF) << 8);
 
   case Z80_YM2612_ADDR:
     {
-      unsigned int rv = YM2612Read(m68k_cycles_master());
+      unsigned int rv = sound_ym_read(m68k_cycles_master());
       return rv | rv << 8;
     }
 
@@ -597,17 +598,17 @@ static inline __attribute__((always_inline)) void gwenesis_bus_write_memory_8(un
     return;
 
   case Z80_CTRL:
-    z80_write_ctrl(address & 0x1FFF, value);
+    sound_z80_ctrl_write(address & 0x1FFF, value);
     return;
 
   case Z80_RAM_ADDR:
   case Z80_RAM_ADDR1K:
-    ZRAM[address & 0x1FFF] = value;
+    sound_zram_write(address & 0x1FFF, value);
     return;
 
   case Z80_YM2612_ADDR:
     bus_log(__FUNCTION__,"CPUZ80PSG8 ,m68kclk= %d", m68k_cycles_master());
-    YM2612Write(address & 0x3, value & 0Xff,m68k_cycles_master());
+    sound_ym_write(address & 0x3, value & 0Xff, m68k_cycles_master());
     static uint32_t ym_bus_writes = 0;
     if ((++ym_bus_writes % 1000) == 0) {
         printf("YM2612 bus writes (8-bit): %lu\n", (unsigned long)ym_bus_writes);
@@ -616,7 +617,7 @@ static inline __attribute__((always_inline)) void gwenesis_bus_write_memory_8(un
 
   case Z80_SN76489_ADDR:
     bus_log(__FUNCTION__,"CPUZ80FM8  ,m68kclk= %d", m68k_cycles_master());
-    gwenesis_SN76489_Write( value & 0Xff, m68k_cycles_master());
+    sound_psg_write(value & 0Xff, m68k_cycles_master());
     static uint32_t sn_bus_writes_8 = 0;
     if ((++sn_bus_writes_8 % 1000) == 0) {
         printf("SN76489 bus writes (8-bit): %lu\n", (unsigned long)sn_bus_writes_8);
@@ -683,12 +684,12 @@ static inline __attribute__((always_inline)) void gwenesis_bus_write_memory_16(u
     return;
 
   case Z80_CTRL:
-    z80_write_ctrl(address & 0xFFFF, value >> 8) ;
+    sound_z80_ctrl_write(address & 0xFFFF, value >> 8);
     return;
 
   case Z80_YM2612_ADDR:
     bus_log(__FUNCTION__,"CZYM16 ,mclk=%d",  m68k_cycles_master());
-    YM2612Write(address & 0x3, value >> 8,m68k_cycles_master() );
+    sound_ym_write(address & 0x3, value >> 8, m68k_cycles_master());
     static uint32_t ym_bus_writes_16 = 0;
     if ((++ym_bus_writes_16 % 1000) == 0) {
         printf("YM2612 bus writes (16-bit): %lu\n", (unsigned long)ym_bus_writes_16);
@@ -697,7 +698,7 @@ static inline __attribute__((always_inline)) void gwenesis_bus_write_memory_16(u
 
   case Z80_SN76489_ADDR:
     bus_log(__FUNCTION__,"CZSN16 ,mclk=%d", m68k_cycles_master());
-    gwenesis_SN76489_Write(value >> 8,m68k_cycles_master() );
+    sound_psg_write(value >> 8, m68k_cycles_master());
     static uint32_t sn_bus_writes = 0;
     if ((++sn_bus_writes % 1000) == 0) {
         printf("SN76489 bus writes: %lu\n", (unsigned long)sn_bus_writes);
