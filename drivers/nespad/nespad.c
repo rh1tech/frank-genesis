@@ -32,13 +32,22 @@ static inline pio_sm_config nespad_program_get_default_config(uint offset) {
 }
 
 static PIO pio = pio1;
-static uint8_t sm = -1;
+
+// Sentinel for "no state machine claimed". This used to be `sm = -1`
+// checked with `sm < 0`, which can never be true for an unsigned type:
+// nespad_read() then drove an out-of-range state machine index and left
+// nespad_state at 0x555555 — every button latched "pressed", which
+// masks all other input sources on boards that have no pad header.
+#define NESPAD_SM_NONE 0xFF
+static uint8_t sm = NESPAD_SM_NONE;
 uint32_t nespad_state = 0;  // Joystick 1
 uint32_t nespad_state2 = 0; // Joystick 2
 
 bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin, uint8_t latPin) {
+    int claimed_sm;
     if (pio_can_add_program(pio, &nespad_program) &&
-        ((sm = pio_claim_unused_sm(pio, true)) >= 0)) {
+        ((claimed_sm = pio_claim_unused_sm(pio, true)) >= 0)) {
+        sm = (uint8_t)claimed_sm;
         uint offset = pio_add_program(pio, &nespad_program);
         pio_sm_config c = nespad_program_get_default_config(offset);
 
@@ -74,7 +83,7 @@ bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin, uint8_t lat
 
 // Read NES/SNES gamepad state
 void nespad_read() {
-    if (sm < 0)
+    if (sm == NESPAD_SM_NONE)
         return;
     if (pio_sm_is_rx_fifo_empty(pio, sm))
         return;
