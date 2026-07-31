@@ -584,7 +584,9 @@ void welcome_screen_show(uint8_t *screen_buffer) {
 
     // Version + board + clocks. Rendered only on the welcome screen so the
     // file browser can stay uncluttered.
-#ifdef BOARD_M2
+#if defined(BOARD_C2)
+    const char *board = "C2";
+#elif defined(BOARD_M2)
     const char *board = "M2";
 #else
     const char *board = "M1";

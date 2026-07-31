@@ -16,6 +16,8 @@ target_link_libraries(ps2mouse PRIVATE
 # Add board variant define
 if(BOARD_VARIANT STREQUAL "M2")
     target_compile_definitions(ps2mouse PRIVATE BOARD_M2)
+elseif(BOARD_VARIANT STREQUAL "C2")
+    target_compile_definitions(ps2mouse PRIVATE BOARD_C2)
 else()
     target_compile_definitions(ps2mouse PRIVATE BOARD_M1)
 endif()

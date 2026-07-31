@@ -9,11 +9,12 @@
  * 
  * BOARD_M1 - M1 GPIO layout
  * BOARD_M2 - M2 GPIO layout
- * 
+ * BOARD_C2 - FRANK Core 2 master (RP2350B, U3)
+ *
  * PSRAM pin is auto-detected based on chip package:
- *   RP2350B: GPIO47 (for both M1 and M2)
+ *   RP2350B: GPIO47 (for M1, M2 and C2)
  *   RP2350A: GPIO19 (M1) or GPIO8 (M2)
- * 
+ *
  * M1 GPIO Layout:
  *   HDMI: CLKN=6, CLKP=7, D0N=8, D0P=9, D1N=10, D1P=11, D2N=12, D2P=13
  *   SD:   CLK=2, CMD=3, DAT0=4, DAT3=5
@@ -26,6 +27,17 @@
  *   PS/2: CLK=2, DATA=3
  *   I2S:  DATA=9, CLK=10, LRCK=11
  *
+ * C2 GPIO Layout (FRANK Core 2 master, RP2350B / U3):
+ *   HDMI: CLKN=12, CLKP=13, D0N=14, D0P=15, D1N=16, D1P=17, D2N=18, D2P=19
+ *   SD:   CLK=6, CMD=7, DAT0=4, DAT3=5
+ *   I2S:  DATA=9, CLK=10, LRCK=11
+ *   PSRAM CS=47, WS2812 status LED=46, UART0 TX=0/RX=1
+ *   PS/2: CLK=2, DATA=3 (spare pads, no connector fitted)
+ *   GPIO20..43 are reserved for the inter-processor link to the slave,
+ *   so C2 has no NES/SNES pad pins — gamepads arrive over USB HID.
+ *   The HDMI/SD/I2S/PSRAM pins are identical to M2 (Murmulator 2.0),
+ *   which is why the drivers drop in unmodified.
+ *
  * CPU/PSRAM Speed (set via CMake -DCPU_SPEED=xxx -DPSRAM_SPEED=xxx):
  *   252 MHz - no overclock (default for stable operation)
  *   378 MHz - medium overclock
@@ -33,7 +45,7 @@
  */
 
 // Default to M1 if no config specified
-#if !defined(BOARD_M1) && !defined(BOARD_M2)
+#if !defined(BOARD_M1) && !defined(BOARD_M2) && !defined(BOARD_C2)
 #define BOARD_M1
 #endif
 
@@ -57,8 +69,12 @@
 //=============================================================================
 
 // PSRAM pin for RP2350A variants
-#ifdef BOARD_M1
+#if defined(BOARD_M1)
 #define PSRAM_PIN_RP2350A 19
+#elif defined(BOARD_C2)
+// C2's master is always the B package; the A-package CS below is the
+// slave's (U5), reached only if this image is ever run on the slave.
+#define PSRAM_PIN_RP2350A 0
 #else
 #define PSRAM_PIN_RP2350A 8
 #endif
@@ -152,5 +168,61 @@ static inline uint get_psram_pin(void) {
 #define I2S_CLOCK_PIN_BASE 10
 
 #endif // BOARD_M2
+
+//=============================================================================
+// C2 Layout Configuration (FRANK Core 2 master, RP2350B / U3)
+//
+// Pin numbers come from the KiCad netlist via
+// frank_core2/firmware/common/frank_core2_board.h.
+//=============================================================================
+#ifdef BOARD_C2
+
+// HDMI Pins (J5, same relative order as M2)
+#define HDMI_PIN_CLKN 12
+#define HDMI_PIN_CLKP 13
+#define HDMI_PIN_D0N  14
+#define HDMI_PIN_D0P  15
+#define HDMI_PIN_D1N  16
+#define HDMI_PIN_D1P  17
+#define HDMI_PIN_D2N  18
+#define HDMI_PIN_D2P  19
+
+#define HDMI_BASE_PIN HDMI_PIN_CLKN
+
+// SD Card Pins (J7, SPI0)
+#define SDCARD_PIN_CLK    6
+#define SDCARD_PIN_CMD    7
+#define SDCARD_PIN_D0     4
+#define SDCARD_PIN_D3     5
+
+// PS/2 Keyboard Pins — spare pads, no connector on this board. The
+// driver pulls both lines up, so init on unrouted pins is inert.
+#define PS2_PIN_CLK  2
+#define PS2_PIN_DATA 3
+
+// PS/2 Mouse Pins — spare pads, no connector.
+#define PS2_MOUSE_CLK  44
+#define PS2_MOUSE_DATA 45
+
+// I2S Audio Pins (U8, TDA1387T)
+#define I2S_DATA_PIN       9
+#define I2S_CLOCK_PIN_BASE 10
+
+// WS2812B status LED (LD1) via 330R
+#define LED_WS2812_PIN 46
+
+// Inter-processor link to the slave (RP2350A / U6). Reserved here so
+// nothing else claims these pins; the link driver lands in a later step.
+#define LINK_A_DATA_BASE 20   // GPIO20..27, master -> slave
+#define LINK_A_CLK       28   // == DATA_BASE + 8
+#define LINK_A_VALID     29   // == DATA_BASE + 9
+#define LINK_B_DATA_BASE 30   // GPIO30..37, slave -> master
+#define LINK_B_CLK       38
+#define LINK_B_VALID     39
+#define LINK_FS          40   // frame sync, out
+#define LINK_DB_OUT      41   // doorbell master -> slave
+#define LINK_DB_IN       42   // doorbell slave -> master
+
+#endif // BOARD_C2
 
 #endif // BOARD_CONFIG_H

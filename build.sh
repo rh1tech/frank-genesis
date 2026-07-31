@@ -1,10 +1,43 @@
 #!/bin/bash
+
+# Locate the Pico SDK. An exported PICO_SDK_PATH wins, but only if it
+# actually contains an SDK — a stale export pointing at a moved
+# directory is a common way to get a confusing CMake failure.
+sdk_is_valid() { [ -n "${1:-}" ] && [ -f "$1/pico_sdk_init.cmake" ]; }
+if ! sdk_is_valid "${PICO_SDK_PATH:-}"; then
+    for candidate in "$HOME/pico/pico-sdk" "$HOME/pico-sdk" \
+                     "$HOME/Documents/pico/pico-sdk" "/opt/pico-sdk"; do
+        if sdk_is_valid "$candidate"; then
+            export PICO_SDK_PATH="$candidate"
+            break
+        fi
+    done
+fi
+if ! sdk_is_valid "${PICO_SDK_PATH:-}"; then
+    echo "Error: could not find the Pico SDK. Set PICO_SDK_PATH to a checkout" >&2
+    echo "       containing pico_sdk_init.cmake." >&2
+    exit 1
+fi
+echo "Pico SDK: $PICO_SDK_PATH"
+
 rm -rf ./build
 mkdir build
 cd build
 
 # Always build for M2 board variant by default.
 BOARD_VARIANT="${BOARD_VARIANT:-M2}"
+
+case "$BOARD_VARIANT" in
+    M1|M2|C2) ;;
+    *) echo "Error: BOARD_VARIANT must be M1, M2 or C2 (got '$BOARD_VARIANT')" >&2; exit 1 ;;
+esac
+
+# C2 (FRANK Core 2) has no NES pad header, so USB HID is the only input
+# path — the CMakeLists forces it on regardless of what is passed here.
+if [ "$BOARD_VARIANT" = "C2" ] && [ "$USB_HID_ENABLED" = "0" ]; then
+    echo "Note: USB_HID_ENABLED=0 ignored on C2 — HID is the only input path"
+    USB_HID_ENABLED=1
+fi
 
 # USB HID support is enabled by default. Set USB_HID_ENABLED=0 to disable.
 CMAKE_OPTS="-DPICO_PLATFORM=rp2350 -DBOARD_VARIANT=${BOARD_VARIANT} -DUSB_HID_ENABLED=1"

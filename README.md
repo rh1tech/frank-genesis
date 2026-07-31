@@ -54,10 +54,22 @@ FRANK Genesis requires 8MB PSRAM to run. You can obtain PSRAM-equipped hardware 
 
 ## Board Configurations
 
-Two GPIO layouts are supported: **M1** and **M2**. The PSRAM pin is auto-detected based on chip package:
+Three GPIO layouts are supported: **M1**, **M2** and **C2**. The PSRAM pin is auto-detected based on chip package:
 
-- **RP2350B**: GPIO47 (both M1 and M2)
+- **RP2350B**: GPIO47 (M1, M2 and C2)
 - **RP2350A**: GPIO19 (M1) or GPIO8 (M2)
+
+**C2** targets the master half (U3, RP2350B) of the dual-RP2350 [FRANK Core
+2](https://github.com/rh1tech/frank) board. Its HDMI, microSD, I2S and PSRAM
+pins are identical to M2, so the drivers are unchanged. What differs:
+
+- GPIO20–43 carry the inter-processor link to the slave, so there are no
+  NES/SNES gamepad pins — USB HID is forced on and is the only input path.
+- The board uses its own SDK header (`boards/frank_core2_master.h`) rather
+  than `pico2`, because the stock definition declares `PICO_RP2350A 1` and
+  would alias GPIO30–47 down into the 0–29 range.
+- The console is UART0 on J2 (GPIO0 TX / GPIO1 RX, 115200), since USB HID
+  takes the USB controller.
 
 ### HDMI (via 270Ω resistors)
 
@@ -200,6 +212,7 @@ make -j$(nproc)
 |--------|-------------|
 | `-DBOARD_VARIANT=M1` | Use M1 GPIO layout (default) |
 | `-DBOARD_VARIANT=M2` | Use M2 GPIO layout |
+| `-DBOARD_VARIANT=C2` | Use FRANK Core 2 master layout (forces USB HID on) |
 | `-DUSB_HID_ENABLED=1` | Enable USB gamepad (disables USB serial) |
 | `-DCPU_SPEED=504` | CPU overclock in MHz (252, 378, 504) |
 | `-DPSRAM_SPEED=166` | PSRAM speed in MHz (100, 133, 166) |
@@ -228,18 +241,29 @@ This creates versioned UF2 files in the `release/` directory:
 
 ### Flashing
 
+`flash.sh` defaults to SWD with a Raspberry Pi Debug Probe, which is the
+preferred path — it does not care what the target is doing, so it still works
+when the firmware has wedged and no BOOTSEL button press can help:
+
+```bash
+./flash.sh                # SWD, auto-detects which MCU the probe is on
+./flash.sh --reset-only   # just reset the attached target
+./flash.sh --usb          # USB BOOTSEL via picotool instead
+```
+
+On FRANK Core 2 the probe goes on J1 (master, U3) or J3 (slave, U6); both
+headers are pin 1 = SWDIO, 2 = GND, 3 = SWCLK. The script reads
+`SYSINFO.PACKAGE_SEL` over the wire to report which chip it found and refuses
+to write this master-side firmware to the slave unless you pass `--force`.
+
+Plain picotool still works if you prefer it:
+
 ```bash
 # With device in BOOTSEL mode:
 picotool load build/frank-genesis.uf2
 
 # Or with device running:
 picotool load -f build/frank-genesis.uf2
-```
-
-Or use the flash script:
-
-```bash
-./flash.sh
 ```
 
 ## SD Card Setup

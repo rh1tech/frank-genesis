@@ -1,10 +1,22 @@
 cmake_minimum_required(VERSION 3.13)
 
-# Set board to Pico 2 (RP2350)
-set(PICO_BOARD pico2 CACHE STRING "Pico board type")
+# Board configuration variant (M1, M2, C2)
+set(BOARD_VARIANT "M1" CACHE STRING "Board variant: M1, M2 or C2")
 
-# Board configuration variant (M1, M2)
-set(BOARD_VARIANT "M1" CACHE STRING "Board variant: M1 or M2")
+if(BOARD_VARIANT STREQUAL "C2")
+    # FRANK Core 2 master is an RP2350B. The stock pico2 definition
+    # declares PICO_RP2350A 1, capping NUM_BANK0_GPIOS at 30 and
+    # switching off PIO's movable GPIO window — the link bus (GPIO20..43),
+    # the WS2812 (GPIO46) and PSRAM CS (GPIO47) would alias down into
+    # 0..29. Our own header sets PICO_RP2350A 0 / PICO_PIO_USE_GPIO_BASE 1.
+    set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards CACHE PATH "" FORCE)
+    set(PICO_BOARD "frank_core2_master" CACHE STRING "Pico board type" FORCE)
+    # USB HID host is the only input path on C2 (no NES pad header).
+    set(USB_HID_ENABLED ON CACHE BOOL "USB HID host" FORCE)
+else()
+    # Set board to Pico 2 (RP2350)
+    set(PICO_BOARD pico2 CACHE STRING "Pico board type")
+endif()
 
 # CPU overclock configuration (252, 378, 504 MHz)
 set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 252, 378, 504")
@@ -236,6 +248,20 @@ elseif(BOARD_VARIANT STREQUAL "M2")
         NESPAD_GPIO_CLK=20
         NESPAD_GPIO_LATCH=21
         NESPAD_GPIO_DATA=26
+    )
+elseif(BOARD_VARIANT STREQUAL "C2")
+    # FRANK Core 2 master. HDMI/SD/I2S/PSRAM match M2 exactly; GPIO20..43
+    # belong to the inter-processor link, so there are no gamepad pins —
+    # NESPAD_GPIO_* stays undefined and main.c skips the driver.
+    target_compile_definitions(frank-genesis PRIVATE
+        # I2S Audio
+        PICO_AUDIO_I2S_DATA_PIN=9
+        PICO_AUDIO_I2S_CLOCK_PIN_BASE=10
+        # SD Card
+        SDCARD_PIN_SPI0_CS=5
+        SDCARD_PIN_SPI0_SCK=6
+        SDCARD_PIN_SPI0_MOSI=7
+        SDCARD_PIN_SPI0_MISO=4
     )
 endif()
 
