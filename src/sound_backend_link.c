@@ -313,6 +313,27 @@ void sound_z80_run(int target) {
  * Frame boundary
  * ===================================================================== */
 
+/* Remembered so the link can re-prime a slave that rejoined.
+ *
+ * The slave loses its ROM and all chip state whenever it reboots — a
+ * watchdog, a reflash, or a power glitch. Uploading only at ROM-load
+ * time meant such a slave stayed silent until the user manually
+ * reloaded the game, with nothing on screen to say why. Re-uploading on
+ * reconnect costs ~0.3 s of audio once, and turns a dead-until-reloaded
+ * slave into one that heals itself. */
+static void ym_shadow_reset(void);
+
+static const uint8_t   *rom_ptr;
+static uint32_t         rom_len;
+static link_sound_config_t rom_cfg;
+
+void sound_link_set_rom(const uint8_t *rom, uint32_t bytes,
+                        const link_sound_config_t *cfg) {
+    rom_ptr = rom;
+    rom_len = bytes;
+    rom_cfg = *cfg;
+}
+
 /* Filled by the exchange, consumed by main.c's audio path. */
 int16_t  link_ym_samples_buf[LINK_MAX_SAMPLES];
 int16_t  link_sn_samples_buf[LINK_MAX_SAMPLES];
@@ -382,7 +403,21 @@ bool sound_link_exchange(void) {
         static uint32_t retry_countdown;
         if (retry_countdown == 0) {
             retry_countdown = 60;               /* ~1 s at 60 fps */
-            link_master_probe(2000, NULL);
+            if (link_master_probe(2000, NULL) && rom_ptr && rom_len) {
+                /* A slave that just rejoined has no ROM and no chip
+                 * state, so it cannot simply resume mid-stream. Prime it
+                 * exactly as a fresh ROM load would. */
+                LOG("Link: slave back — re-uploading %lu KB ROM\n",
+                    (unsigned long)(rom_len >> 10));
+                if (link_master_upload_rom(rom_ptr, rom_len) &&
+                    link_master_send_config(&rom_cfg)) {
+                    ym_shadow_reset();
+                    memset(zram_dirty, 0, sizeof(zram_dirty));
+                    memset(zram_frame_dirty, 0xFF, sizeof(zram_frame_dirty));
+                    zram_frame_any = true;   /* resend all of Z80 RAM */
+                    LOG("Link: slave re-primed\n");
+                }
+            }
         } else {
             retry_countdown--;
         }

@@ -49,6 +49,10 @@ extern bool z80_enabled;
  * status. Neither failure points anywhere near a #define. */
 #include "gwenesis_bus.h"
 
+/* Where the chips are actually driven from, so "is the driver idle?" and
+ * "is the chip being written but silent?" can be told apart. */
+uint32_t n_ym_writes, n_psg_writes, n_zram_applied, n_zram_bytes_applied;
+
 const uint8_t *slave_zram(void) {
     return zram;
 }
@@ -57,13 +61,17 @@ const uint8_t *slave_zram(void) {
  * bitmap are taken, so bytes this slave's own Z80 wrote are preserved —
  * the master's mirror is stale for those. */
 void slave_zram_apply(const uint32_t *bitmap, const uint8_t *data) {
+    n_zram_applied++;
     for (uint32_t w = 0; w < SLAVE_ZRAM_SIZE / 32; w++) {
         uint32_t dirty = bitmap[w];
         if (!dirty) continue;
 
         uint32_t base = w * 32;
         for (uint32_t b = 0; b < 32; b++) {
-            if (dirty & (1u << b)) zram[base + b] = data[base + b];
+            if (dirty & (1u << b)) {
+                zram[base + b] = data[base + b];
+                n_zram_bytes_applied++;
+            }
         }
     }
 }

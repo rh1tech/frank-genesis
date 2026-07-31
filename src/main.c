@@ -1372,6 +1372,12 @@ int main(void) {
         cfg.channel_mask      = g_settings.channel_mask;
         cfg.samples_per_frame = 888;
 
+        /* Remember it so the link can re-prime a slave that reboots or
+         * gets reflashed without the user having to reload the game. */
+        extern void sound_link_set_rom(const uint8_t *, uint32_t,
+                                       const link_sound_config_t *);
+        sound_link_set_rom(ROM_DATA, rom_size_bytes, &cfg);
+
         if (link_master_upload_rom(ROM_DATA, rom_size_bytes) &&
             link_master_send_config(&cfg)) {
             LOG("Link: slave ready\n");
