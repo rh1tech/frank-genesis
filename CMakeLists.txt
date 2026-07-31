@@ -85,6 +85,11 @@ add_subdirectory(src/fatfs)
 add_subdirectory(drivers/sdcard)
 add_subdirectory(drivers/nespad)
 add_subdirectory(drivers/ps2kbd)
+# Inter-processor sound link — C2 only. The slave half is built by
+# slave/CMakeLists.txt, which links the same library.
+if(BOARD_VARIANT STREQUAL "C2")
+    add_subdirectory(link)
+endif()
 
 # Create a library for other drivers
 add_library(drivers
@@ -174,10 +179,20 @@ set_source_files_properties(src/cpus/Z80_GPX/z80_gpx.c PROPERTIES
     COMPILE_FLAGS "-O3 -ffast-math -funroll-loops -finline-functions"
 )
 
-add_executable(frank-genesis
+set(MASTER_SOURCES
     src/main.c
     src/rom_selector.c
     src/settings.c
+)
+
+# C2 offloads the whole sound subsystem to the slave, so the master also
+# carries its half of the link.
+if(BOARD_VARIANT STREQUAL "C2")
+    list(APPEND MASTER_SOURCES src/link_master.c src/sound_backend_link.c)
+endif()
+
+add_executable(frank-genesis
+    ${MASTER_SOURCES}
     ${GWENESIS_SOURCES}
 )
 
@@ -279,6 +294,10 @@ target_link_libraries(frank-genesis
     nespad
     ps2kbd
 )
+
+if(BOARD_VARIANT STREQUAL "C2")
+    target_link_libraries(frank-genesis link)
+endif()
 
 # USB configuration: stdio vs HID Host (mutually exclusive)
 if(USB_HID_ENABLED)

@@ -211,17 +211,9 @@ static inline uint get_psram_pin(void) {
 // WS2812B status LED (LD1) via 330R
 #define LED_WS2812_PIN 46
 
-// Inter-processor link to the slave (RP2350A / U6). Reserved here so
-// nothing else claims these pins; the link driver lands in a later step.
-#define LINK_A_DATA_BASE 20   // GPIO20..27, master -> slave
-#define LINK_A_CLK       28   // == DATA_BASE + 8
-#define LINK_A_VALID     29   // == DATA_BASE + 9
-#define LINK_B_DATA_BASE 30   // GPIO30..37, slave -> master
-#define LINK_B_CLK       38
-#define LINK_B_VALID     39
-#define LINK_FS          40   // frame sync, out
-#define LINK_DB_OUT      41   // doorbell master -> slave
-#define LINK_DB_IN       42   // doorbell slave -> master
+// Inter-processor link to the slave (RP2350A / U6) occupies GPIO20..42.
+// The pin map lives in link/link_pins.h, shared by both halves so the
+// two builds cannot drift apart. Nothing else may claim those pins.
 
 #endif // BOARD_C2
 

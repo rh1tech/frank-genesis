@@ -1,0 +1,170 @@
+/*
+ * frank-genesis — C2 slave: sound subsystem
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Replays the master's event stream and renders the frame's audio.
+ *
+ * The whole correctness argument rests on one property: the master
+ * emits events in the order it performed them, each stamped with
+ * m68k_cycles_master() at the moment of the access, and this loop
+ * applies them in that same order with slave_replay_clock set to the
+ * stamp. The chips therefore see the same writes at the same emulated
+ * times as they would have inline, and running a frame late changes
+ * nothing they can observe.
+ *
+ * In particular the RUN_UNTIL markers reproduce the master's Z80
+ * scheduling exactly: it pumps z80_run() every Z80_SLICE_LINES
+ * scanlines, so the Z80 is routinely *ahead* of the 68K's current cycle
+ * when a 68K write lands. Replaying in program order preserves that
+ * interleaving rather than trying to re-derive it.
+ */
+
+#include "slave_sound.h"
+
+#include <stdbool.h>
+#include <string.h>
+
+#include "gwenesis_sn76489.h"
+#include "ym2612.h"
+#include "z80inst.h"
+
+/* Owned by gwenesis_bus.c on the master; the slave owns it here. The
+ * Z80 assembly reaches it through the Z80_RAM pointer. */
+#define SLAVE_ZRAM_SIZE 0x2000
+static unsigned char zram[SLAVE_ZRAM_SIZE];
+
+/* Mute flags that live inside ym2612.c. */
+extern bool ym2612_fm_enabled;
+extern bool ym2612_dac_enabled;
+extern bool ym2612_channel_enabled[6];
+extern bool z80_enabled;
+
+/* Audio clock divisor, matching the master's gwenesis configuration. */
+#ifndef AUDIO_FREQ_DIVISOR
+#define AUDIO_FREQ_DIVISOR 60
+#endif
+
+const uint8_t *slave_zram(void) {
+    return zram;
+}
+
+void slave_sound_init(void) {
+    memset(zram, 0, sizeof(zram));
+
+    z80_set_memory(zram);
+    z80_start();
+
+    YM2612Init();
+    YM2612ResetChip();
+    YM2612Config(YM2612_DISCRETE);
+
+    /* Same arguments as the master's main.c, so both halves agree on
+     * the PSG's clock and the samples-per-second it renders at. */
+    gwenesis_SN76489_Init(3579545, 888 * 60, AUDIO_FREQ_DIVISOR, PSG_INTEGRATED);
+    gwenesis_SN76489_Reset();
+
+    slave_replay_clock = 0;
+}
+
+void slave_sound_reset(void) {
+    memset(zram, 0, sizeof(zram));
+
+    z80_pulse_reset();
+    YM2612ResetChip();
+    gwenesis_SN76489_Reset();
+
+    slave_replay_clock  = 0;
+    sn76489_clock = sn76489_index = 0;
+    ym2612_clock  = ym2612_index  = 0;
+
+    slave_foreign_reads  = 0;
+    slave_foreign_writes = 0;
+}
+
+void slave_sound_config(const link_sound_config_t *cfg) {
+    z80_enabled        = cfg->z80_enabled ? true : false;
+    ym2612_fm_enabled  = cfg->fm_enabled ? true : false;
+    ym2612_dac_enabled = cfg->dac_enabled ? true : false;
+
+    for (int i = 0; i < 6; i++) {
+        ym2612_channel_enabled[i] = (cfg->channel_mask >> i) & 1;
+    }
+}
+
+void slave_sound_run_frame(const link_event_t *events, uint32_t count,
+                           int audio_target_clock,
+                           link_frame_reply_t *reply) {
+    /* The master resets these at the top of every frame; the slave has
+     * to do the same or the chips render past the end of the buffer. */
+    sn76489_clock = 0;
+    sn76489_index = 0;
+    ym2612_clock  = 0;
+    ym2612_index  = 0;
+
+    uint32_t last_cycles = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        const link_event_t *e = &events[i];
+
+        slave_replay_clock = (int)e->cycles;
+        last_cycles = e->cycles;
+
+        switch (e->type) {
+        case LINK_EV_RUN_UNTIL:
+            z80_run((int)e->cycles);
+            break;
+
+        case LINK_EV_YM_WRITE:
+            YM2612Write(e->addr & 3, e->val, (int)e->cycles);
+            break;
+
+        case LINK_EV_PSG_WRITE:
+            gwenesis_SN76489_Write(e->val, (int)e->cycles);
+            break;
+
+        case LINK_EV_ZRAM_WRITE:
+            zram[e->addr & (SLAVE_ZRAM_SIZE - 1)] = e->val;
+            break;
+
+        case LINK_EV_BUSREQ:
+            /* 0xA11100. z80_write_ctrl syncs the Z80 first, exactly as
+             * on the master. */
+            z80_write_ctrl(0x1100, e->val);
+            break;
+
+        case LINK_EV_RESET_LINE:
+            z80_write_ctrl(0x1200, e->val);
+            break;
+
+        case LINK_EV_IRQ:
+            z80_irq_line(e->val);
+            break;
+
+        case LINK_EV_BANK_WRITE:
+            /* The 68K bus path for the bank register is a no-op on the
+             * master too — only the Z80 itself writes it, through its
+             * own 0x6000 mapping. Kept for completeness. */
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    /* Close the frame: render whatever the chips still owe. Matches the
+     * master's sound_frame_end(). */
+    gwenesis_SN76489_run(audio_target_clock);
+    ym2612_run(audio_target_clock);
+
+    reply->ym_samples     = (uint32_t)ym2612_index;
+    reply->sn_samples     = (uint32_t)sn76489_index;
+    reply->z80_cycles     = last_cycles;
+    reply->foreign_reads  = slave_foreign_reads;
+    reply->foreign_writes = slave_foreign_writes;
+
+    if (reply->ym_samples > SLAVE_AUDIO_BUFFER_SIZE)
+        reply->ym_samples = SLAVE_AUDIO_BUFFER_SIZE;
+    if (reply->sn_samples > SLAVE_AUDIO_BUFFER_SIZE)
+        reply->sn_samples = SLAVE_AUDIO_BUFFER_SIZE;
+}

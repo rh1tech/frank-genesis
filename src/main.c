@@ -35,6 +35,7 @@
 #include "sound/z80_benchmark.h"
 #include "sound/ym2612.h"
 #include "sound/gwenesis_sn76489.h"
+#include "sound/sound_backend.h"
 
 // Audio driver (simple DMA-based I2S)
 #include "audio.h"
@@ -48,6 +49,17 @@
 // USB HID (gamepad support) - build with USB_HID_ENABLED=1 ./build.sh
 #ifdef USB_HID_ENABLED
 #include "usbhid/usbhid.h"
+#endif
+
+// C2 only: the sound subsystem lives on the second RP2350.
+#ifdef BOARD_C2
+#include "link_master.h"
+extern int16_t  link_ym_samples_buf[];
+extern int16_t  link_sn_samples_buf[];
+extern volatile uint32_t link_ym_sample_count;
+extern volatile uint32_t link_sn_sample_count;
+extern bool sound_link_exchange(void);
+extern void sound_link_backend_reset(void);
 #endif
 
 // ROM selector
@@ -579,6 +591,26 @@ static void __scratch_x("sound") sound_core(void) {
         __dmb();
         
         // Submit samples to I2S - samples were already generated during emulation
+#ifdef BOARD_C2
+        // The sound subsystem lives on the slave. Ship this frame's
+        // event stream and collect the chips' output, then hand it to
+        // the same audio path M1/M2 use. Core 0 is already emulating the
+        // next frame while this runs — that is the whole point of doing
+        // it here rather than on core 0.
+        if (sound_link_exchange()) {
+            audio_read_ym2612  = link_ym_samples_buf;
+            audio_read_sn76489 = link_sn_samples_buf;
+            saved_ym_samples   = (int)link_ym_sample_count;
+            saved_sn_samples   = (int)link_sn_sample_count;
+        } else {
+            // Slave silent or the exchange failed: audio_submit() fades
+            // to zero rather than replaying the previous frame.
+            saved_ym_samples = 0;
+            saved_sn_samples = 0;
+        }
+        __dmb();
+#endif
+
         // This blocks until previous frame's DMA is done
         audio_submit();
         
@@ -859,7 +891,7 @@ static void __time_critical_func(emulation_loop)(void) {
                 (scan_line == screen_height);
             if (z80_run_due) {
                 PROFILE_START();
-                z80_run(system_clock + VDP_CYCLES_PER_LINE);
+                sound_z80_run(system_clock + VDP_CYCLES_PER_LINE);
                 PROFILE_END(z80_time);
             }
             
@@ -889,10 +921,10 @@ static void __time_critical_func(emulation_loop)(void) {
                     m68k_set_irq(6);
                 }
                 // Z80 IRQ for vblank (Z80 runs on Core 0)
-                z80_irq_line(1);
+                sound_z80_irq(1);
             }
             if (scan_line == screen_height + 1) {
-                z80_irq_line(0);
+                sound_z80_irq(0);
             }
             
             system_clock += VDP_CYCLES_PER_LINE;
@@ -903,8 +935,7 @@ static void __time_critical_func(emulation_loop)(void) {
         #define TARGET_SAMPLES_PER_FRAME 888
         #define AUDIO_TARGET_CLOCK (TARGET_SAMPLES_PER_FRAME * AUDIO_FREQ_DIVISOR)
         PROFILE_START();
-        gwenesis_SN76489_run(AUDIO_TARGET_CLOCK);
-        ym2612_run(AUDIO_TARGET_CLOCK);
+        sound_frame_end(AUDIO_TARGET_CLOCK);
         PROFILE_END(sound_time);
         
         // ==================================================================
@@ -1023,9 +1054,11 @@ static void __time_critical_func(emulation_loop)(void) {
         saved_ym_samples = ym2612_index;
         saved_sn_samples = sn76489_index;
         
+#ifndef BOARD_C2
         // Set read buffer pointers for Core 1 (current write buffer becomes read buffer)
         audio_read_sn76489 = gwenesis_sn76489_buffer;
         audio_read_ym2612 = gwenesis_ym2612_buffer;
+#endif
         
         // Memory barrier to ensure all writes are visible to Core 1
         __dmb();
@@ -1123,7 +1156,28 @@ int main(void) {
     LOG("   FRANK Genesis - Genesis for RP2350\n");
     LOG("========================================\n");
     LOG("System Clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
-    
+
+#ifdef BOARD_C2
+    // Bring the inter-processor link up early: it only claims PIO2 and
+    // two DMA channels, and doing it before the slave is probed means a
+    // slave that boots late still finds a working wire waiting.
+    link_master_init();
+    {
+        link_node_info_t slave_info;
+        // Short patience here — a missing slave must cost a moment, not
+        // two seconds of a stalled boot. The master falls back to
+        // running the sound chips itself.
+        if (link_master_probe(200000, &slave_info)) {
+            LOG("Link: slave up, %lu MHz, PSRAM %lu MB, fw %u.%u\n",
+                (unsigned long)(slave_info.sys_clk_hz / 1000000),
+                (unsigned long)(slave_info.psram_bytes >> 20),
+                slave_info.fw_version >> 8, slave_info.fw_version & 0xFF);
+        } else {
+            LOG("Link: DOWN - no slave, sound runs on the master\n");
+        }
+    }
+#endif
+
     // Initialize PSRAM
     LOG("Initializing PSRAM...\n");
     uint psram_pin = get_psram_pin();

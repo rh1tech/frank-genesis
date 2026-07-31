@@ -17,9 +17,10 @@
 # Usage:
 #   ./flash.sh                       # SWD, auto-detect target
 #   ./flash.sh build/frank-genesis.elf
+#   ./flash.sh --slave               # flash the C2 sound slave (probe on J3)
 #   ./flash.sh --usb [firmware]      # USB BOOTSEL via picotool instead
 #   ./flash.sh --reset-only          # just reset the attached target
-#   ./flash.sh --force               # allow flashing an RP2350A (slave)
+#   ./flash.sh --force               # ignore the master/slave package check
 #
 set -uo pipefail
 
@@ -28,12 +29,14 @@ cd "$(dirname "$0")"
 MODE="swd"
 FORCE=0
 RESET_ONLY=0
+SLAVE=0
 FIRMWARE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --usb)        MODE="usb" ;;
         --swd)        MODE="swd" ;;
+        --slave)      SLAVE=1 ;;
         --reset-only) RESET_ONLY=1 ;;
         --force)      FORCE=1 ;;
         -h|--help)
@@ -58,6 +61,8 @@ resolve_firmware() {
 
     if [ -n "$FIRMWARE" ]; then
         base="${FIRMWARE%.*}"
+    elif [ "$SLAVE" = "1" ]; then
+        base="./slave/build/frank-genesis-slave"
     else
         base="./build/frank-genesis"
     fi
@@ -142,7 +147,7 @@ fi
 package_word=$(echo "$probe_output" | awk '/^0x40000004:/ {print $2; exit}')
 
 if [ -n "$package_word" ] && [ $(( 0x${package_word} & 1 )) -eq 1 ]; then
-    TARGET_DESC="RP2350A (QFN-60) — the C2 slave"
+    TARGET_DESC="RP2350A (QFN-60) — the C2 sound slave"
     IS_SLAVE=1
 else
     TARGET_DESC="RP2350B (QFN-80) — master / M1 / M2"
@@ -151,12 +156,24 @@ fi
 
 echo "SWD target: ${TARGET_DESC}"
 
-if [ "$IS_SLAVE" = "1" ] && [ "$FORCE" != "1" ]; then
-    echo >&2
-    echo "Refusing to flash: frank-genesis is master-side firmware and the" >&2
-    echo "probe is on an RP2350A. Move the probe to the master header (C2: J1)" >&2
-    echo "or pass --force if you really mean it." >&2
-    exit 1
+# The two images are not interchangeable: the master drives HDMI, SD and
+# I2S from an RP2350B pinout, the slave runs the sound subsystem on an
+# RP2350A. Writing one to the other half wastes a flash cycle and leaves
+# a board that looks broken for no visible reason, so check first.
+if [ "$FORCE" != "1" ]; then
+    if [ "$SLAVE" = "1" ] && [ "$IS_SLAVE" = "0" ]; then
+        echo >&2
+        echo "Refusing to flash: --slave was given but the probe is on the" >&2
+        echo "RP2350B master. Move it to the slave header (C2: J3)." >&2
+        exit 1
+    fi
+    if [ "$SLAVE" = "0" ] && [ "$IS_SLAVE" = "1" ]; then
+        echo >&2
+        echo "Refusing to flash: frank-genesis is master-side firmware and the" >&2
+        echo "probe is on an RP2350A. Move the probe to the master header" >&2
+        echo "(C2: J1), or pass --slave to flash the sound slave instead." >&2
+        exit 1
+    fi
 fi
 
 echo "Flashing over SWD: $FW"

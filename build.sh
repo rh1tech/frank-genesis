@@ -89,3 +89,25 @@ fi
 
 cmake $CMAKE_OPTS ..
 make -j4
+
+# C2 is two firmwares. Build both from one command so the halves cannot
+# drift apart: they share the wire protocol and the sound cores, and a
+# master talking to a stale slave is a confusing failure to debug.
+if [ "$BOARD_VARIANT" = "C2" ]; then
+    cd ..
+    echo
+    echo "=== Building C2 sound slave ==="
+    # Both halves must use the same CPU_SPEED — the receiving PIO program
+    # has to complete its loop inside the transmitter's byte period, and
+    # each side derives that from its own system clock.
+    SLAVE_OPTS="-DPICO_PLATFORM=rp2350"
+    [ -n "${CPU_SPEED:-}" ] && SLAVE_OPTS="$SLAVE_OPTS -DCPU_SPEED=$CPU_SPEED"
+    [ -n "${Z80_CORE:-}" ]  && SLAVE_OPTS="$SLAVE_OPTS -DZ80_CORE=$Z80_CORE"
+
+    cmake -S slave -B slave/build $SLAVE_OPTS || exit 1
+    cmake --build slave/build -j4 || exit 1
+
+    echo
+    echo "Master: ./build/frank-genesis.uf2"
+    echo "Slave:  ./slave/build/frank-genesis-slave.uf2"
+fi
