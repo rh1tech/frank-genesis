@@ -18,6 +18,7 @@
 #include "pico/time.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
+#include "hardware/structs/qmi.h"
 #include "hardware/structs/sysinfo.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
@@ -42,6 +43,35 @@
 #define SLAVE_FW_VERSION 0x0100   /* 1.0 */
 #endif
 
+/* Flash QMI timing for overclocked operation.
+ *
+ * Copied from the master's main.c, and not optional: the XIP flash
+ * divider is derived from the system clock, so raising the core to
+ * 504 MHz without widening it runs the QSPI far out of spec and the
+ * slave faults before it reaches main(). Omitting this is what turned
+ * "match the two clocks" into a slave that would not boot at all.
+ */
+#define FLASH_MAX_FREQ_MHZ 88
+
+static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz) {
+    const int clock_hz = cpu_mhz * 1000000;
+    const int max_flash_freq = FLASH_MAX_FREQ_MHZ * 1000000;
+
+    int divisor = (clock_hz + max_flash_freq - (max_flash_freq >> 4) - 1) / max_flash_freq;
+    if (divisor == 1 && clock_hz >= 166000000) {
+        divisor = 2;
+    }
+
+    int rxdelay = divisor;
+    if (clock_hz / divisor > 100000000 && clock_hz >= 166000000) {
+        rxdelay += 1;
+    }
+
+    qmi_hw->m[0].timing = 0x60007000 |
+                        rxdelay << QMI_M0_TIMING_RXDELAY_LSB |
+                        divisor << QMI_M0_TIMING_CLKDIV_LSB;
+}
+
 /* PSRAM is mapped at the XIP CS1 window; the ROM image lives at its
  * base. 8 MB covers every Genesis ROM. */
 #define PSRAM_BASE   ((unsigned char *)0x11000000u)
@@ -61,6 +91,12 @@ static link_event_t __attribute__((aligned(4))) events[LINK_MAX_EVENTS];
  * straight into the PSRAM XIP window would mix link traffic with QMI
  * refills on the same bus, and a 32 KiB bounce is cheap. */
 static uint8_t __attribute__((aligned(4))) rom_chunk[LINK_ROM_CHUNK_BYTES];
+
+/* Step counters, so a failed upload says which step failed rather than
+ * just leaving rom_received_bytes at zero. */
+uint32_t n_hello, n_rom_begin, n_rom_chunk, n_rom_chunk_bulkfail;
+uint32_t n_rom_end, n_frame, n_zram_block, n_zram_bulkfail, n_ev_bulkfail;
+uint32_t last_chunk_off, last_chunk_len;
 
 static uint32_t rom_expected_bytes;
 static uint32_t rom_received_bytes;
@@ -152,17 +188,39 @@ static void fill_node_info(link_node_info_t *info) {
 
 /* ---- Opcode handlers ---- */
 
+static uint32_t __attribute__((aligned(4))) zram_bitmap[LINK_ZRAM_BYTES / 32];
+static uint8_t  __attribute__((aligned(4))) zram_block[LINK_ZRAM_BYTES];
+
 static void handle_frame(const link_hdr_t *h) {
     uint32_t count = h->arg0;
+    uint32_t audio_target = h->arg1;
+
     if (count > LINK_MAX_EVENTS) {
         count = LINK_MAX_EVENTS;
         frame_overflows++;
+    }
+
+    /* The master follows every FRAME with a ZRAM_BLOCK control frame
+     * saying whether its 68K touched Z80 RAM this frame. Driver uploads
+     * are 8 KB of byte writes; as events they would swamp the ring. */
+    if (link_s_wait_ctrl(&session, LINK_CTRL_TIMEOUT_US) != LINK_OP_ZRAM_BLOCK) {
+        return;
+    }
+    n_zram_block++;
+    if (link_rx_hdr(&session)->arg0) {
+        if (!link_s_bulk_recv(&session, zram_bitmap, LINK_ZRAM_BYTES / 8) ||
+            !link_s_bulk_recv(&session, zram_block, LINK_ZRAM_BYTES)) {
+            n_zram_bulkfail++;
+            return;
+        }
+        slave_zram_apply(zram_bitmap, zram_block);
     }
 
     /* Events arrive as one bulk transfer straight after the header. */
     if (count) {
         if (!link_s_bulk_recv(&session, events,
                               count * sizeof(link_event_t))) {
+            n_ev_bulkfail++;
             return;
         }
     }
@@ -171,7 +229,7 @@ static void handle_frame(const link_hdr_t *h) {
     memset(&reply, 0, sizeof(reply));
     reply.seq = h->seq;
 
-    slave_sound_run_frame(events, count, (int)h->arg1, &reply);
+    slave_sound_run_frame(events, count, (int)audio_target, &reply);
 
     reply.zram_bytes = LINK_ZRAM_BYTES;
     reply.overflows  = frame_overflows;
@@ -200,7 +258,12 @@ static void handle_rom_chunk(const link_hdr_t *h) {
 
     if (len > LINK_ROM_CHUNK_BYTES) len = LINK_ROM_CHUNK_BYTES;
 
-    bool ok = link_s_bulk_recv(&session, rom_chunk, len);
+    n_rom_chunk++;
+    last_chunk_off = offset;
+    last_chunk_len = len;
+
+    bool ok = link_s_bulk_recv(&session, rom_chunk, LINK_ALIGN4(len));
+    if (!ok) n_rom_chunk_bulkfail++;
 
     if (ok && offset + len <= PSRAM_BYTES) {
         memcpy(PSRAM_BASE + offset, rom_chunk, len);
@@ -226,6 +289,7 @@ static void serve_one(void) {
         link_s_send_ctrl(&session, LINK_OP_HELLO_ACK, 0, 0,
                          &info, sizeof(info));
         heartbeat_period_ms = 200;      /* "serving" */
+        n_hello++;
         break;
     }
 
@@ -248,6 +312,7 @@ static void serve_one(void) {
     }
 
     case LINK_OP_ROM_BEGIN:
+        n_rom_begin++;
         rom_expected_bytes = h->arg0;
         rom_received_bytes = 0;
         slave_sound_reset();
@@ -260,6 +325,7 @@ static void serve_one(void) {
         break;
 
     case LINK_OP_ROM_END: {
+        n_rom_end++;
         slave_rom_set(PSRAM_BASE, rom_received_bytes);
         /* CRC the image as stored, so a corrupted upload is caught here
          * rather than as mysteriously wrong music later. */
@@ -271,6 +337,7 @@ static void serve_one(void) {
     }
 
     case LINK_OP_FRAME:
+        n_frame++;
         handle_frame(h);
         break;
 
@@ -283,6 +350,7 @@ int main(void) {
 #if CPU_CLOCK_MHZ > 252
     vreg_disable_voltage_limit();
     vreg_set_voltage(CPU_VOLTAGE);
+    set_flash_timings(CPU_CLOCK_MHZ);
     sleep_ms(100);
 #endif
     if (!set_sys_clock_khz(CPU_CLOCK_MHZ * 1000, false)) {

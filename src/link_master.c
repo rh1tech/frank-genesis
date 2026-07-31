@@ -12,6 +12,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/time.h"
+#include "hardware/clocks.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -36,10 +37,14 @@ static bool           initialized;
 static bool           connected;
 static uint32_t       last_foreign_reads;
 
-/* Steady-state patience. One NTSC frame is 16.7 ms; a slave that has
- * stopped answering should cost a frame of audio and be noticed, not
- * stall the emulator behind a two-second handshake timeout. */
-#define LINK_FRAME_TIMEOUT_US 8000u
+/* The slave does not merely acknowledge a frame — it replays the whole
+ * event stream, runs the Z80 and renders the FM and PSG, which is
+ * precisely the work we moved off the master. That takes on the order of
+ * a frame, so the master must wait for it. An 8 ms budget (my first
+ * guess, one NTSC frame's worth of "surely it is quick") dropped the
+ * link after ~50 frames. Generous enough for the slave to finish,
+ * bounded so a dead slave is still noticed within a few frames. */
+#define LINK_FRAME_TIMEOUT_US 100000u
 
 void link_master_init(void) {
     if (initialized) return;
@@ -70,8 +75,34 @@ bool link_master_probe(uint32_t timeout_us, link_node_info_t *info) {
               link_m_recv_ctrl(&session) &&
               link_rx_hdr(&session)->op == LINK_OP_HELLO_ACK;
 
-    if (ok && info) {
-        memcpy(info, ctrl_rx + sizeof(link_hdr_t), sizeof(*info));
+    if (ok) {
+        link_node_info_t ni;
+        memcpy(&ni, ctrl_rx + sizeof(link_hdr_t), sizeof(ni));
+        if (info) *info = ni;
+
+        /* Match the wire rate to the slower half.
+         *
+         * Only the transmitter is divided; the receiver is edge-driven
+         * and runs at its own system clock, needing 5 of its cycles per
+         * byte. So if the slave is slower than us, we must stretch our
+         * bulk bytes by exactly that ratio or it drops them — which
+         * looks like working control frames and failing bulk, because
+         * control already runs at a slower divider.
+         *
+         * Building both halves at the same CPU_SPEED is still the
+         * intent; this makes a mismatch degrade throughput instead of
+         * silently corrupting every transfer. */
+        uint32_t ours = clock_get_hz(clk_sys);
+        if (ni.sys_clk_hz && ours > ni.sys_clk_hz) {
+            float ratio = (float)ours / (float)ni.sys_clk_hz;
+            link_set_bulk_clkdiv(&link, ratio);
+            LOG("Link: slave at %lu MHz vs our %lu — bulk divider %d.%02d\n",
+                (unsigned long)(ni.sys_clk_hz / 1000000),
+                (unsigned long)(ours / 1000000),
+                (int)ratio, (int)((ratio - (int)ratio) * 100));
+        } else {
+            link_set_bulk_clkdiv(&link, 1.0f);
+        }
     }
 
     session.handshake_timeout_us = 0;
@@ -173,7 +204,7 @@ bool link_master_upload_rom(const uint8_t *rom, uint32_t bytes) {
 }
 
 bool link_master_frame(const link_event_t *events, uint32_t count,
-                       int audio_target, uint32_t seq,
+                       bool zram_dirty, int audio_target, uint32_t seq,
                        int16_t *ym_out, int16_t *sn_out,
                        uint32_t *ym_count, uint32_t *sn_count,
                        void (*zram_merge)(const uint8_t *snapshot)) {
@@ -185,6 +216,18 @@ bool link_master_frame(const link_event_t *events, uint32_t count,
 
     bool ok = link_m_send_ctrl(&session, LINK_OP_FRAME, count,
                                (uint32_t)audio_target, NULL, 0);
+    /* Always follow with ZRAM_BLOCK so the slave's step sequence is the
+     * same whether or not anything changed. */
+    if (ok) {
+        ok = link_m_send_ctrl(&session, LINK_OP_ZRAM_BLOCK,
+                              zram_dirty ? 1 : 0, 0, NULL, 0);
+    }
+    if (ok && zram_dirty) {
+        extern uint32_t zram_frame_dirty[];
+        extern uint8_t *zram_frame_data;
+        ok = link_m_bulk_send(&session, zram_frame_dirty, LINK_ZRAM_BYTES / 8) &&
+             link_m_bulk_send(&session, zram_frame_data, LINK_ZRAM_BYTES);
+    }
 
     if (ok && count) {
         ok = link_m_bulk_send(&session, events, count * sizeof(link_event_t));

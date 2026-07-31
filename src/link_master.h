@@ -57,7 +57,7 @@ bool link_master_upload_rom(const uint8_t *rom, uint32_t bytes);
  * and its Z80 RAM snapshot. `zram_merge` is called with the 8 KB
  * snapshot so the caller can merge it under its own recent writes. */
 bool link_master_frame(const link_event_t *events, uint32_t count,
-                       int audio_target, uint32_t seq,
+                       bool zram_dirty, int audio_target, uint32_t seq,
                        int16_t *ym_out, int16_t *sn_out,
                        uint32_t *ym_count, uint32_t *sn_count,
                        void (*zram_merge)(const uint8_t *snapshot));

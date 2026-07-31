@@ -61,6 +61,13 @@ enum {
     LINK_OP_FRAME_ACK    = 0x0031,  /* S->M: payload link_frame_reply_t,
                                      *       then audio + ZRAM bulk       */
 
+    /* Sent immediately after LINK_OP_FRAME. arg0 = 1 when a Z80 RAM
+     * block follows (dirty bitmap then the full 8 KB); 0 when nothing
+     * changed. 68K writes to Z80 RAM are a bulk memcpy during driver
+     * upload, not a stream of register pokes, so they travel as a block
+     * rather than as thousands of events. */
+    LINK_OP_ZRAM_BLOCK   = 0x0032,
+
     LINK_OP_PING         = 0x0040,  /* M->S: liveness / latency probe     */
     LINK_OP_PONG         = 0x0041,
 };

@@ -41,8 +41,13 @@ static uint32_t     event_count[2];
 static volatile int event_write;      /* buffer core 0 is filling */
 static uint32_t     event_overflows;
 
+/* Per-type totals, for working out what actually fills a frame. */
+uint32_t sound_link_ev_stats[16];
+
 static inline void emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
     uint32_t n = event_count[event_write];
+
+    sound_link_ev_stats[type & 15]++;
 
     /* Truncate rather than wrap. Losing the tail of one frame's writes
      * degrades that frame's sound; wrapping would reorder the stream and
@@ -75,15 +80,34 @@ static inline void emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
  * ===================================================================== */
 
 static uint8_t  zram_mirror[LINK_ZRAM_BYTES];
-static uint32_t zram_dirty[LINK_ZRAM_BYTES / 32];   /* one bit per byte */
+static uint32_t zram_dirty[LINK_ZRAM_BYTES / 32];   /* since last merge  */
+uint32_t        zram_frame_dirty[LINK_ZRAM_BYTES / 32]; /* this frame    */
+uint8_t        *zram_frame_data = zram_mirror;
+volatile bool   zram_frame_any;
 
+/* 68K writes to Z80 RAM are NOT streamed as events.
+ *
+ * A game uploading its sound driver writes the whole 8 KB in a single
+ * frame — measured at 8476 writes against a 4096-event ring, which
+ * truncated the upload and left the slave running a corrupt driver.
+ * Byte events are simply the wrong shape for a bulk memcpy.
+ *
+ * Instead the writes accumulate in the mirror with a per-frame dirty
+ * bitmap, and the frame exchange ships the bitmap plus the mirror as one
+ * block. The slave applies only the marked bytes, so bytes its own Z80
+ * wrote are left alone.
+ *
+ * Ordering against Z80 execution is safe: the 68K holds BUSREQ across
+ * these writes (that is what the BUSREQ events are), so the Z80 is
+ * halted while they happen and cannot observe the difference between
+ * applying them per-write and applying them at frame start. */
 void sound_zram_write(unsigned int offset, unsigned int value) {
     offset &= (LINK_ZRAM_BYTES - 1);
 
     zram_mirror[offset] = (uint8_t)value;
-    zram_dirty[offset >> 5] |= 1u << (offset & 31);
-
-    emit(LINK_EV_ZRAM_WRITE, (uint16_t)offset, (uint8_t)value, 0);
+    zram_dirty[offset >> 5]       |= 1u << (offset & 31);
+    zram_frame_dirty[offset >> 5] |= 1u << (offset & 31);
+    zram_frame_any = true;
 }
 
 unsigned int sound_zram_read(unsigned int offset) {
@@ -126,9 +150,14 @@ static void zram_merge(const uint8_t *snapshot) {
  * which is the same conversion ym2612_run() uses.
  * ===================================================================== */
 
-#ifndef AUDIO_FREQ_DIVISOR
-#define AUDIO_FREQ_DIVISOR 60
-#endif
+/* AUDIO_FREQ_DIVISOR is 1009, and it must come from the real header.
+ *
+ * A local "#ifndef ... #define 60" fallback here compiled perfectly and
+ * was silently wrong by a factor of ~17: the PSG rendered 14933 samples
+ * a frame instead of 888 and sat pinned at its buffer clamp, and the
+ * YM timer shadow would have ticked ~17x fast and reported nonsense
+ * status. Neither failure points anywhere near a #define. */
+#include "gwenesis_bus.h"
 
 static struct {
     int32_t TA, TAL, TAC;
@@ -292,9 +321,30 @@ volatile uint32_t link_sn_sample_count;
 
 static volatile int      pending_buffer = -1;   /* buffer awaiting send */
 static volatile uint32_t pending_target;
+static volatile bool     pending_zram;
 static uint32_t          frame_seq;
 
+/* Coprocessors this build depends on: CP0 is the GPIO coprocessor that
+ * gpio_put() compiles to on RP2350, CP10/CP11 are the VFP that GCC uses
+ * for 64-bit maths. Halting the core with a debugger clears CPACR, and
+ * the next such instruction then takes a UsageFault (CFSR NOCP) that
+ * escalates to a HardFault — so attaching a debugger to a running
+ * emulator would kill it. Re-asserting once per frame costs a compare
+ * and keeps the master inspectable. The slave does the same in its
+ * serve loop. */
+#define CPACR_NEEDED 0x00F00303u
+
+static inline void cpacr_ensure(void) {
+    volatile uint32_t *cpacr = (volatile uint32_t *)0xE000ED88u;
+    if ((*cpacr & CPACR_NEEDED) != CPACR_NEEDED) {
+        *cpacr |= CPACR_NEEDED;
+        __asm volatile ("dsb; isb" ::: "memory");
+    }
+}
+
 void sound_frame_end(int audio_target_clock) {
+    cpacr_ensure();
+
     /* Hand the finished buffer to core 1 and start filling the other.
      * If core 1 has not drained the previous one yet the emulator is
      * outrunning the slave; dropping this frame's events would
@@ -303,6 +353,7 @@ void sound_frame_end(int audio_target_clock) {
     while (pending_buffer >= 0) tight_loop_contents();
 
     pending_target = (uint32_t)audio_target_clock;
+    pending_zram   = zram_frame_any;
     pending_buffer = event_write;
     __dmb();
 
@@ -317,14 +368,43 @@ bool sound_link_exchange(void) {
     int buf = pending_buffer;
     if (buf < 0) return false;
 
+    /* While the link is down, probe occasionally so a slave that booted
+     * late, was reflashed, or rebooted on its own rejoins without the
+     * user having to reset the master. Once a second is often enough to
+     * feel immediate and rare enough that a genuinely absent slave costs
+     * almost nothing.
+     *
+     * A slave that rejoins mid-game has no ROM and no chip state, so it
+     * cannot simply resume: the caller re-uploads at the next ROM load.
+     * Until then the exchange keeps failing and audio stays silent,
+     * which is the honest outcome rather than replaying stale samples. */
+    if (!link_master_connected()) {
+        static uint32_t retry_countdown;
+        if (retry_countdown == 0) {
+            retry_countdown = 60;               /* ~1 s at 60 fps */
+            link_master_probe(2000, NULL);
+        } else {
+            retry_countdown--;
+        }
+
+        pending_buffer = -1;
+        link_ym_sample_count = 0;
+        link_sn_sample_count = 0;
+        return false;
+    }
+
     bool ok = link_master_frame(events[buf], event_count[buf],
-                                (int)pending_target, ++frame_seq,
+                                pending_zram, (int)pending_target, ++frame_seq,
                                 link_ym_samples_buf, link_sn_samples_buf,
                                 (uint32_t *)&link_ym_sample_count,
                                 (uint32_t *)&link_sn_sample_count,
                                 zram_merge);
 
     __dmb();
+    if (pending_zram) {
+        memset(zram_frame_dirty, 0, sizeof(zram_frame_dirty));
+        zram_frame_any = false;
+    }
     pending_buffer = -1;
 
     if (!ok) {
@@ -339,6 +419,8 @@ void sound_link_backend_reset(void) {
 
     memset(zram_mirror, 0, sizeof(zram_mirror));
     memset(zram_dirty, 0, sizeof(zram_dirty));
+    memset(zram_frame_dirty, 0, sizeof(zram_frame_dirty));
+    zram_frame_any = false;
 
     event_count[0] = event_count[1] = 0;
     event_write    = 0;

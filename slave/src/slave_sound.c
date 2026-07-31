@@ -40,13 +40,32 @@ extern bool ym2612_dac_enabled;
 extern bool ym2612_channel_enabled[6];
 extern bool z80_enabled;
 
-/* Audio clock divisor, matching the master's gwenesis configuration. */
-#ifndef AUDIO_FREQ_DIVISOR
-#define AUDIO_FREQ_DIVISOR 60
-#endif
+/* AUDIO_FREQ_DIVISOR is 1009, and it must come from the real header.
+ *
+ * A local "#ifndef ... #define 60" fallback here compiled perfectly and
+ * was silently wrong by a factor of ~17: the PSG rendered 14933 samples
+ * a frame instead of 888 and sat pinned at its buffer clamp, and the
+ * YM timer shadow would have ticked ~17x fast and reported nonsense
+ * status. Neither failure points anywhere near a #define. */
+#include "gwenesis_bus.h"
 
 const uint8_t *slave_zram(void) {
     return zram;
+}
+
+/* Apply the master's 68K writes to Z80 RAM. Only bytes marked in the
+ * bitmap are taken, so bytes this slave's own Z80 wrote are preserved —
+ * the master's mirror is stale for those. */
+void slave_zram_apply(const uint32_t *bitmap, const uint8_t *data) {
+    for (uint32_t w = 0; w < SLAVE_ZRAM_SIZE / 32; w++) {
+        uint32_t dirty = bitmap[w];
+        if (!dirty) continue;
+
+        uint32_t base = w * 32;
+        for (uint32_t b = 0; b < 32; b++) {
+            if (dirty & (1u << b)) zram[base + b] = data[base + b];
+        }
+    }
 }
 
 void slave_sound_init(void) {
@@ -95,8 +114,19 @@ void slave_sound_config(const link_sound_config_t *cfg) {
 void slave_sound_run_frame(const link_event_t *events, uint32_t count,
                            int audio_target_clock,
                            link_frame_reply_t *reply) {
-    /* The master resets these at the top of every frame; the slave has
-     * to do the same or the chips render past the end of the buffer. */
+    /* The master resets all of these at the top of every frame
+     * (main.c:846-851), and the slave must do exactly the same.
+     *
+     * zclk is the one that matters most and is the easiest to miss. The
+     * master restarts its cycle count from zero each frame, so every
+     * RUN_UNTIL target is a small number. Leaving zclk at the end of the
+     * previous frame (~896040) makes z80_run() take its `zclk >= target`
+     * early return for every subsequent frame: the Z80 executes for
+     * exactly one frame and then never again. The chips stay powered and
+     * keep rendering, so the symptom is not silence but a constant DC
+     * level out of the FM — which looks like a mixing bug, not a stopped
+     * CPU. */
+    zclk          = 0;
     sn76489_clock = 0;
     sn76489_index = 0;
     ym2612_clock  = 0;

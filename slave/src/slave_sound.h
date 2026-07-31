@@ -50,4 +50,7 @@ void slave_sound_run_frame(const link_event_t *events, uint32_t count,
 /* The live Z80 RAM, for the per-frame snapshot the master reads back. */
 const uint8_t *slave_zram(void);
 
+/* Apply the master's dirty-masked 68K writes to Z80 RAM. */
+void slave_zram_apply(const uint32_t *bitmap, const uint8_t *data);
+
 #endif /* SLAVE_SOUND_H */

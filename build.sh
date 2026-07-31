@@ -97,11 +97,17 @@ if [ "$BOARD_VARIANT" = "C2" ]; then
     cd ..
     echo
     echo "=== Building C2 sound slave ==="
-    # Both halves must use the same CPU_SPEED — the receiving PIO program
-    # has to complete its loop inside the transmitter's byte period, and
-    # each side derives that from its own system clock.
-    SLAVE_OPTS="-DPICO_PLATFORM=rp2350"
-    [ -n "${CPU_SPEED:-}" ] && SLAVE_OPTS="$SLAVE_OPTS -DCPU_SPEED=$CPU_SPEED"
+    # Both halves MUST run the same system clock. The receiving PIO
+    # program has to finish its loop inside the transmitter's byte
+    # period and each side derives that from its own clock, so a 504 MHz
+    # master talking to a 252 MHz slave transmits bulk data at twice the
+    # rate the slave can sample. Control frames survive (they use a
+    # slower divider); bulk silently loses bytes.
+    #
+    # Default matches the master's CMake default rather than the slave's.
+    SLAVE_CPU_SPEED="${CPU_SPEED:-504}"
+    SLAVE_OPTS="-DPICO_PLATFORM=rp2350 -DCPU_SPEED=${SLAVE_CPU_SPEED}"
+    echo "Slave CPU_SPEED=${SLAVE_CPU_SPEED} (must match the master)"
     [ -n "${Z80_CORE:-}" ]  && SLAVE_OPTS="$SLAVE_OPTS -DZ80_CORE=$Z80_CORE"
 
     cmake -S slave -B slave/build $SLAVE_OPTS || exit 1

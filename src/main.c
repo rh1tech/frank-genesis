@@ -329,6 +329,7 @@ int16_t *audio_read_ym2612 = NULL;
 
 // ROM buffer in PSRAM
 static uint8_t *rom_buffer = NULL;
+static uint32_t rom_size_bytes = 0;
 // Remove duplicate MAX_ROM_SIZE - it's defined in gwenesis_bus.h
 
 // Gwenesis external variables
@@ -499,6 +500,7 @@ static bool load_rom(const char *filename) {
     
     // Set ROM_DATA to point to our PSRAM buffer
     ROM_DATA = rom_buffer;
+    rom_size_bytes = (uint32_t)bytes_read;
     
     return true;
 }
@@ -1344,6 +1346,44 @@ int main(void) {
         }
     }
     
+#ifdef BOARD_C2
+    // Hand the ROM to the sound slave. Its Z80 reads the 68K address
+    // space through the bank register, so it needs the whole image, not
+    // just the driver. The buffer is already byte-swapped and the slave
+    // applies the same ^1 on read, so both halves agree.
+    //
+    // Retry the probe first: the master may have booted before the
+    // slave finished its own PSRAM bring-up, and by the time a ROM has
+    // been chosen the slave is certainly up.
+    for (int attempt = 0; attempt < 5 && !link_master_connected(); attempt++) {
+        link_master_probe(200000, NULL);
+    }
+
+    if (link_master_connected()) {
+        LOG("Link: uploading %lu KB ROM to slave...\n",
+            (unsigned long)(rom_size_bytes >> 10));
+
+        link_sound_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.z80_enabled       = g_settings.z80_enabled;
+        cfg.fm_enabled        = g_settings.fm_sound;
+        cfg.dac_enabled       = CHANNEL_ENABLED(g_settings.channel_mask, 5);
+        cfg.psg_enabled       = CHANNEL_ENABLED(g_settings.channel_mask, 6);
+        cfg.channel_mask      = g_settings.channel_mask;
+        cfg.samples_per_frame = 888;
+
+        if (link_master_upload_rom(ROM_DATA, rom_size_bytes) &&
+            link_master_send_config(&cfg)) {
+            LOG("Link: slave ready\n");
+        } else {
+            LOG("Link: slave setup FAILED - no sound this session\n");
+        }
+    } else {
+        LOG("Link: slave down - no sound this session\n");
+    }
+    sound_link_backend_reset();
+#endif
+
     // Initialize emulator
     genesis_init();
     
