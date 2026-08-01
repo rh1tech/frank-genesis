@@ -165,6 +165,8 @@ typedef struct __attribute__((packed)) {
     uint32_t foreign_reads;    /* Z80 reads into 68K space we can't serve */
     uint32_t foreign_writes;
     uint32_t overflows;        /* frames whose event list was truncated */
+    uint32_t ym_status;        /* the real chip's status byte, for auditing
+                                * the master's timer shadow against it   */
 } link_frame_reply_t;
 
 /* Z80 RAM is 8 KB; the snapshot is the whole thing. */

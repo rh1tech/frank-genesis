@@ -44,6 +44,10 @@ uint32_t link_fail_stage;
 /* ROM upload progress, so a failed upload names the step it died on.
  * 0 = never attempted, 1 = BEGIN sent, 2 = BEGIN acked, 3 = in chunks,
  * 4 = END sent, 5 = END acked, 9 = complete and CRC matched. */
+uint32_t link_frame_fails;      /* exchanges that did not complete */
+uint32_t link_ym_mismatch;      /* frames where the shadow disagreed */
+uint32_t link_ym_checked;
+uint8_t  link_ym_last_ours, link_ym_last_theirs;
 uint32_t link_upload_stage;
 uint32_t link_upload_chunk;
 uint32_t link_probe_ok, link_probe_fail;
@@ -240,9 +244,21 @@ bool link_master_frame(const link_event_t *events, uint32_t count,
     /* Always follow with ZRAM_BLOCK so the slave's step sequence is the
      * same whether or not anything changed. */
     if (ok) {
+        /* arg1 asks for a Z80 RAM snapshot in the reply.
+         *
+         * Sending 8 KB back every frame cost a bulk transfer and a
+         * doorbell round trip for data the 68K reads about 0.3 times a
+         * frame. That is pure latency on core 1, which has a 16.7 ms
+         * budget to keep the I2S chain fed — and missing it makes the
+         * DMA replay a stale buffer, which is audible. Ask only when the
+         * 68K has actually looked at Z80 RAM since the last snapshot. */
+        extern volatile bool zram_read_since_snapshot;
+        uint32_t want_snapshot = zram_read_since_snapshot ? 1u : 0u;
+
         link_fail_stage = 2;
         ok = link_m_send_ctrl(&session, LINK_OP_ZRAM_BLOCK,
-                              zram_dirty ? 1 : 0, 0, NULL, 0);
+                              zram_dirty ? 1 : 0, want_snapshot, NULL, 0);
+        if (ok && want_snapshot) zram_read_since_snapshot = false;
     }
     if (ok && zram_dirty) {
         extern uint32_t *zram_frame_dirty;
@@ -291,6 +307,20 @@ bool link_master_frame(const link_event_t *events, uint32_t count,
             link_fail_stage = 0;
         }
 
+        /* Audit the master's YM status shadow against the real chip. */
+        {
+            extern volatile uint8_t link_ym_status_real;
+            extern uint8_t sound_ym_shadow_status(void);
+            uint8_t ours = sound_ym_shadow_status();
+            link_ym_status_real = (uint8_t)reply.ym_status;   /* publish truth */
+            link_ym_checked++;
+            if (ours != (uint8_t)reply.ym_status) {
+                link_ym_mismatch++;
+                link_ym_last_ours   = ours;
+                link_ym_last_theirs = (uint8_t)reply.ym_status;
+            }
+        }
+
         /* Surface anything the slave could not do rather than letting it
          * show up only as sound that is subtly wrong. */
         if (reply.foreign_reads != last_foreign_reads) {
@@ -302,7 +332,16 @@ bool link_master_frame(const link_event_t *events, uint32_t count,
 
     (void)seq;
     session.handshake_timeout_us = 0;
-    if (!ok) connected = false;
+
+    if (!ok) {
+        link_frame_fails++;
+        /* Drop both doorbells and let the peer's own timeout expire
+         * before anything else is attempted, so the two sides restart
+         * from a known state instead of interleaving a half-finished
+         * exchange with the next one. */
+        link_db_set(&link, false);
+        connected = false;
+    }
     return ok;
 }
 

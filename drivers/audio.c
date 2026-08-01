@@ -42,7 +42,17 @@
 #define AUDIO_DMA_CH_A 10
 #define AUDIO_DMA_CH_B 11
 
-#define DMA_BUFFER_COUNT 2
+/* Four buffers, not two.
+ *
+ * The DMA consumes one buffer every 16.7 ms regardless of what the CPU
+ * is doing, so the producer must never be later than the depth of the
+ * queue. Two buffers gave ~33 ms of slack, and on C2 core 1 spends
+ * ~4.3 ms of every frame waiting for the sound slave on top of its own
+ * mixing — close enough to the limit that it missed roughly once every
+ * seven seconds, and each miss makes the chain replay a stale buffer,
+ * which is plainly audible. Four buffers doubles the margin for 8 KB of
+ * RAM and one extra frame of latency. */
+#define DMA_BUFFER_COUNT 4
 // One DMA word is one stereo frame (packed L/R int16).
 // AUDIO_BUFFER_SAMPLES is sized to cover NTSC/PAL with headroom.
 #define DMA_BUFFER_MAX_SAMPLES AUDIO_BUFFER_SAMPLES
@@ -52,9 +62,18 @@ static uint32_t __attribute__((aligned(4))) dma_buffers[DMA_BUFFER_COUNT][DMA_BU
 // Bitmask of buffers the CPU is allowed to write (1 = free)
 static volatile uint32_t dma_buffers_free_mask = 0;
 
-// Pre-roll: fill both buffers before starting playback
-#define PREROLL_BUFFERS 2
+/* Pre-roll must be less than the queue depth, or the producer would
+ * wait for a slot the DMA has not been started to release yet. */
+#define PREROLL_BUFFERS 3
 static volatile int preroll_count = 0;
+
+/* Playback order is the ring order, so the producer fills strictly in
+ * sequence and each channel takes every other slot: A the even ones, B
+ * the odd. That keeps the existing A->B->A chain intact while giving the
+ * queue four entries instead of two. */
+static volatile uint8_t fill_idx = 0;
+static volatile uint8_t slot_a = 0;
+static volatile uint8_t slot_b = 1;
 
 static int dma_channel_a = -1;
 static int dma_channel_b = -1;
@@ -63,6 +82,17 @@ static uint audio_sm;
 static uint32_t dma_transfer_count;
 
 static volatile bool audio_running = false;
+
+/* How often the DMA chain had to be rebuilt. Non-zero means the audio
+ * path is being starved; it is a health metric, not a normal event. */
+volatile uint32_t i2s_dma_restarts = 0;
+
+/* Buffers the DMA has actually consumed, and buffers handed to it.
+ * Consumed climbing faster than fed means the chain is replaying stale
+ * audio — the DAC's rate is fixed, so a producer slower than real time
+ * is heard as repetition, not as silence. */
+volatile uint32_t i2s_buffers_consumed = 0;
+volatile uint32_t i2s_buffers_fed = 0;
 
 static void audio_dma_irq_handler(void);
 
@@ -214,7 +244,8 @@ void i2s_init(i2s_config_t *config) {
     
     // Initialize state
     preroll_count = 0;
-    dma_buffers_free_mask = (1u << DMA_BUFFER_COUNT) - 1u; // both free
+    dma_buffers_free_mask = (1u << DMA_BUFFER_COUNT) - 1u; // all free
+    slot_a = 0; slot_b = 1; fill_idx = 0;
     audio_running = false;
 
 #if ENABLE_LOGGING
@@ -226,30 +257,65 @@ void i2s_dma_write_count(i2s_config_t *config, const int16_t *samples, uint32_t 
     if (sample_count > dma_transfer_count) sample_count = dma_transfer_count;
     if (sample_count == 0) sample_count = 1;
 
-    // Wait for a free buffer, then claim it (atomically vs DMA IRQ)
+    /* Wait for a free buffer, then claim it (atomically vs the DMA IRQ).
+     *
+     * Bounded, and able to restart the chain. Channels A and B trigger
+     * each other, and the IRQ only reprograms the one that finished — so
+     * if a chain trigger is ever lost the pair simply stops, no buffer is
+     * ever freed again, and an unbounded wait here deadlocks the caller
+     * forever. On a single-core audio path that was merely latent; once
+     * this runs on a core that also does other work, a late IRQ makes it
+     * reachable, and the whole emulator freezes behind it.
+     *
+     * One buffer is 888 frames, about 16.7 ms, so anything beyond a few
+     * buffer periods means the DMA is not running rather than busy. */
     uint8_t buf_index = 0;
+    absolute_time_t wait_deadline = make_timeout_time_ms(60);
+
     while (true) {
         uint32_t irq_state = save_and_disable_interrupts();
-        uint32_t free_mask = dma_buffers_free_mask;
 
-        if (!audio_running) {
-            // Pre-roll fills buffer 0 then buffer 1 to preserve ordering
-            buf_index = (uint8_t)preroll_count;
-            if (buf_index < DMA_BUFFER_COUNT && (free_mask & (1u << buf_index))) {
-                dma_buffers_free_mask &= ~(1u << buf_index);
-                restore_interrupts(irq_state);
-                break;
-            }
-        } else {
-            if (free_mask) {
-                buf_index = (free_mask & 1u) ? 0 : 1;
-                dma_buffers_free_mask &= ~(1u << buf_index);
-                restore_interrupts(irq_state);
-                break;
-            }
+        buf_index = fill_idx;
+        if (dma_buffers_free_mask & (1u << buf_index)) {
+            dma_buffers_free_mask &= ~(1u << buf_index);
+            fill_idx = (uint8_t)((buf_index + 1u) & (DMA_BUFFER_COUNT - 1u));
+            restore_interrupts(irq_state);
+            break;
         }
 
         restore_interrupts(irq_state);
+
+        if (time_reached(wait_deadline)) {
+            /* Stalled. Rebuild the ping-pong from a known state and
+             * re-preroll; the caller's samples land in buffer 0 and
+             * playback restarts once both are filled. Costs a couple of
+             * frames of audio, against never recovering at all. */
+            irq_state = save_and_disable_interrupts();
+
+            dma_channel_abort(dma_channel_a);
+            dma_channel_abort(dma_channel_b);
+            dma_hw->ints1 = (1u << dma_channel_a) | (1u << dma_channel_b);
+
+            slot_a = 0;
+            slot_b = 1;
+            fill_idx = 0;
+            dma_channel_set_read_addr(dma_channel_a, dma_buffers[0], false);
+            dma_channel_set_trans_count(dma_channel_a, dma_transfer_count, false);
+            dma_channel_set_read_addr(dma_channel_b, dma_buffers[1], false);
+            dma_channel_set_trans_count(dma_channel_b, dma_transfer_count, false);
+
+            dma_buffers_free_mask = (1u << DMA_BUFFER_COUNT) - 1u;
+            preroll_count = 0;
+            audio_running = false;
+            i2s_dma_restarts++;
+
+            buf_index = 0;
+            dma_buffers_free_mask &= ~1u;
+            fill_idx = 1;
+            restore_interrupts(irq_state);
+            break;
+        }
+
         tight_loop_contents();
     }
 
@@ -273,6 +339,8 @@ void i2s_dma_write_count(i2s_config_t *config, const int16_t *samples, uint32_t 
     // Memory barrier to ensure writes are visible before DMA reads
     __dmb();
     
+    i2s_buffers_fed++;
+
     if (!audio_running) {
         preroll_count++;
         if (preroll_count >= PREROLL_BUFFERS) {
@@ -469,16 +537,20 @@ static void audio_dma_irq_handler(void) {
 
     if ((dma_channel_a >= 0) && (ints & (1u << dma_channel_a))) {
         dma_hw->ints1 = (1u << dma_channel_a);
-        dma_channel_set_read_addr(dma_channel_a, dma_buffers[0], false);
+        dma_buffers_free_mask |= (1u << slot_a);
+        slot_a = (uint8_t)((slot_a + 2u) & (DMA_BUFFER_COUNT - 1u));
+        dma_channel_set_read_addr(dma_channel_a, dma_buffers[slot_a], false);
         dma_channel_set_trans_count(dma_channel_a, dma_transfer_count, false);
-        dma_buffers_free_mask |= 1u;
+        i2s_buffers_consumed++;
     }
 
     if ((dma_channel_b >= 0) && (ints & (1u << dma_channel_b))) {
         dma_hw->ints1 = (1u << dma_channel_b);
-        dma_channel_set_read_addr(dma_channel_b, dma_buffers[1], false);
+        dma_buffers_free_mask |= (1u << slot_b);
+        slot_b = (uint8_t)((slot_b + 2u) & (DMA_BUFFER_COUNT - 1u));
+        dma_channel_set_read_addr(dma_channel_b, dma_buffers[slot_b], false);
         dma_channel_set_trans_count(dma_channel_b, dma_transfer_count, false);
-        dma_buffers_free_mask |= 2u;
+        i2s_buffers_consumed++;
     }
 }
 

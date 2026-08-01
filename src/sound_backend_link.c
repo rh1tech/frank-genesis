@@ -26,6 +26,9 @@
 #include "link_master.h"
 #include "link_proto.h"
 
+/* The 68K lives here, so the true cycle count is available directly. */
+extern int m68k_cycles_master(void);
+
 #if ENABLE_LOGGING
 #define LOG(...) printf(__VA_ARGS__)
 #else
@@ -125,8 +128,29 @@ void sound_zram_write(unsigned int offset, unsigned int value) {
     zram_dirty_bytes++;
 }
 
+/* How hard the 68K reads Z80 RAM, and where. If it polls a handful of
+ * addresses hard, it is waiting on the Z80 — and every such read is
+ * answered from a mirror that is up to a frame stale in both
+ * directions, which is the remaining way this split can go wrong. */
+uint32_t link_zram_reads;
+volatile bool zram_read_since_snapshot = true;   /* ask once at startup */
+uint16_t link_zram_hot_addr;
+uint32_t link_zram_hot_hits;
+
 unsigned int sound_zram_read(unsigned int offset) {
-    return zram_mirror[offset & (LINK_ZRAM_BYTES - 1)];
+    offset &= (LINK_ZRAM_BYTES - 1);
+
+    link_zram_reads++;
+    zram_read_since_snapshot = true;
+    if (offset == link_zram_hot_addr) {
+        link_zram_hot_hits++;
+    } else if (link_zram_hot_hits == 0) {
+        link_zram_hot_addr = (uint16_t)offset;
+    } else {
+        link_zram_hot_hits--;      /* Boyer-Moore majority vote */
+    }
+
+    return zram_mirror[offset];
 }
 
 /* Merge a fresh snapshot under the master's own recent writes. Word-wise
@@ -179,8 +203,8 @@ static struct {
     int32_t TB, TBL, TBC;
     uint8_t mode;
     uint8_t status;
-    int32_t clock;      /* master cycles already accounted for */
-    uint8_t addr_latch; /* last address written to port 0/2    */
+    int32_t clock;       /* master cycles already accounted for */
+    uint16_t addr_latch; /* 9-bit: bank 1 is 0x100 | reg       */
 } ym;
 
 static void ym_shadow_reset(void) {
@@ -234,16 +258,22 @@ static void ym_shadow_run(int target) {
 static void ym_shadow_write(unsigned int port, unsigned int value, int cycles) {
     ym_shadow_run(cycles);
 
-    /* Ports 0/2 latch a register address, ports 1/3 write data. Only
-     * bank 0 (port 0/1) carries the timer registers. */
-    if ((port & 1) == 0) {
-        ym.addr_latch = (uint8_t)value;
-        return;
-    }
-    if (port != 1) return;      /* bank 1 has no timer registers */
+    /* Mirror ym2612.c's latching exactly (YM2612Write, case 0 / case 2):
+     * there is ONE address latch, port 0 stores `v` and port 2 stores
+     * `v | 0x100`, and BOTH data ports write through whichever was set
+     * last.
+     *
+     * Treating port 2 as another port-0 latch — which is what this did —
+     * means a bank-1 address write followed by a data write lands on the
+     * bank-0 timer registers instead of bank 1. The timer model then
+     * drifts from the chip, the 68K polls a status byte that never
+     * matches reality, and the game runs off into unmapped memory. */
+    if (port == 0) { ym.addr_latch = (uint16_t)value; return; }
+    if (port == 2) { ym.addr_latch = (uint16_t)value | 0x100u; return; }
 
     uint8_t v = (uint8_t)value;
 
+    /* Only bank 0 carries the timers; 0x124.. are ordinary registers. */
     switch (ym.addr_latch) {
     case 0x24:
         ym.TA  = (ym.TA & 0x03) | ((int32_t)v << 2);
@@ -275,14 +305,39 @@ static void ym_shadow_write(unsigned int port, unsigned int value, int cycles) {
  * ===================================================================== */
 
 void sound_ym_write(unsigned int port, unsigned int value, int cycles) {
+    /* Still tracked so the audit can report on it, but no longer the
+     * source of truth for reads. */
     ym_shadow_write(port, value, cycles);
     emit(LINK_EV_YM_WRITE, (uint16_t)(port & 3), (uint8_t)value, cycles);
 }
 
+/* Status byte as last reported by the real chip on the slave, plus a
+ * count of how hard the 68K polls it. */
+volatile uint8_t  link_ym_status_real;
+uint32_t          link_ym_reads;
+
 unsigned int sound_ym_read(int cycles) {
-    ym_shadow_run(cycles);
-    return ym.status;
+    (void)cycles;
+    link_ym_reads++;
+
+    /* Return what the real YM2612 last reported, not a local model.
+     *
+     * The shadow could never work: it only saw the 68K's writes, and
+     * sound drivers program the timer registers (0x24-0x27) from the
+     * Z80, whose writes happen entirely on the slave. Audited against
+     * the chip it disagreed on 73% of frames — always reporting no
+     * timer overflow, because it never saw a timer being started. The
+     * 68K paces music on that bit.
+     *
+     * This is up to one frame stale. The timer flags latch until the
+     * driver clears them via register 0x27, so a late "set" is normally
+     * harmless; a 68K that spins on a transition *within* one frame
+     * would need a real round trip, which link_ym_reads will tell us. */
+    return link_ym_status_real;
 }
+
+/* The modelled value, kept only so the audit can keep reporting on it. */
+uint8_t sound_ym_shadow_status(void) { return ym.status; }
 
 void sound_psg_write(unsigned int value, int cycles) {
     emit(LINK_EV_PSG_WRITE, 0, (uint8_t)value, cycles);
@@ -304,12 +359,20 @@ void sound_z80_ctrl_write(unsigned int address, unsigned int value) {
      * several times a frame, so it sat at PC=0 forever while every other
      * indicator (reset released, bus granted, zclk advancing a full
      * frame) said it was running normally. */
+    /* Timestamp these properly. z80_write_ctrl() begins with z80_sync(),
+     * which runs the Z80 up to m68k_cycles_master() *before* the bus
+     * state changes — so the cycle count is part of the semantics, not
+     * decoration. Emitting 0 made that sync a no-op on the slave: the
+     * Z80 was at the wrong point whenever the 68K took or released the
+     * bus, which shifts everything the sound driver does afterwards. */
+    int now = m68k_cycles_master();
+
     if (address == 0x1100) {
         z80_bus_ack = value ? 1 : 0;
-        emit(LINK_EV_BUSREQ, 0, (uint8_t)(value ? 1 : 0), 0);
+        emit(LINK_EV_BUSREQ, 0, (uint8_t)(value ? 1 : 0), now);
     } else if (address == 0x1200) {
         z80_reset_held = value ? 0 : 1;
-        emit(LINK_EV_RESET_LINE, 0, (uint8_t)(value ? 1 : 0), 0);
+        emit(LINK_EV_RESET_LINE, 0, (uint8_t)(value ? 1 : 0), now);
     }
 }
 
@@ -323,7 +386,7 @@ unsigned int sound_z80_ctrl_read(unsigned int address) {
 }
 
 void sound_z80_irq(unsigned int level) {
-    emit(LINK_EV_IRQ, 0, (uint8_t)(level ? 1 : 0), 0);
+    emit(LINK_EV_IRQ, 0, (uint8_t)(level ? 1 : 0), m68k_cycles_master());
 }
 
 void sound_z80_run(int target) {
@@ -362,6 +425,12 @@ int16_t  link_ym_samples_buf[LINK_MAX_SAMPLES];
 int16_t  link_sn_samples_buf[LINK_MAX_SAMPLES];
 volatile uint32_t link_ym_sample_count;
 volatile uint32_t link_sn_sample_count;
+
+uint32_t link_audio_frames, link_audio_silent, link_audio_clipped;
+uint32_t link_audio_shortframes;
+uint32_t link_xchg_max_us, link_xchg_over8ms, link_xchg_over16ms;
+uint64_t link_xchg_total_us;
+uint16_t link_audio_last_peak;
 
 static volatile int      pending_buffer = -1;   /* buffer awaiting send */
 static volatile uint32_t pending_target;
@@ -494,12 +563,50 @@ bool sound_link_exchange(void) {
         return false;
     }
 
+    uint64_t t_start = time_us_64();
+
     bool ok = link_master_frame(events[buf], event_count[buf],
                                 pending_zram, (int)pending_target, ++frame_seq,
                                 link_ym_samples_buf, link_sn_samples_buf,
                                 (uint32_t *)&link_ym_sample_count,
                                 (uint32_t *)&link_sn_sample_count,
                                 zram_merge);
+
+    {
+        uint32_t dt = (uint32_t)(time_us_64() - t_start);
+        link_xchg_total_us += dt;
+        if (dt > link_xchg_max_us) link_xchg_max_us = dt;
+        if (dt > 8000)  link_xchg_over8ms++;
+        if (dt > 16000) link_xchg_over16ms++;
+    }
+
+    /* Characterise the audio actually arriving, per frame. If the break
+     * is in the samples rather than the transport, it shows up here as
+     * silent or clipped frames — measurable without a capture device. */
+    if (ok) {
+        uint32_t n = link_ym_sample_count;
+        if (n > LINK_MAX_SAMPLES) n = LINK_MAX_SAMPLES;
+        int32_t peak = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            int32_t v = link_ym_samples_buf[i];
+            if (v < 0) v = -v;
+            if (v > peak) peak = v;
+        }
+        uint32_t sn = link_sn_sample_count;
+        if (sn > LINK_MAX_SAMPLES) sn = LINK_MAX_SAMPLES;
+        int32_t speak = 0;
+        for (uint32_t i = 0; i < sn; i++) {
+            int32_t v = link_sn_samples_buf[i];
+            if (v < 0) v = -v;
+            if (v > speak) speak = v;
+        }
+
+        link_audio_frames++;
+        if (peak < 32 && speak < 32)        link_audio_silent++;
+        if (peak > 30000 || speak > 30000)  link_audio_clipped++;
+        if (n != 888 || sn != 888)          link_audio_shortframes++;
+        link_audio_last_peak = (uint16_t)peak;
+    }
 
     __dmb();
     pending_buffer = -1;

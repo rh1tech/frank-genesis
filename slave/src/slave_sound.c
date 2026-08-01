@@ -195,6 +195,9 @@ void slave_sound_run_frame(const link_event_t *events, uint32_t count,
     gwenesis_SN76489_run(audio_target_clock);
     ym2612_run(audio_target_clock);
 
+    /* The master models this byte locally to avoid a round trip on every
+     * 68K status poll; report the truth so it can be audited. */
+    reply->ym_status      = YM2612Read((int)audio_target_clock) & 0xFF;
     reply->ym_samples     = (uint32_t)ym2612_index;
     reply->sn_samples     = (uint32_t)sn76489_index;
     reply->z80_cycles     = last_cycles;

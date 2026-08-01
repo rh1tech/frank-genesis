@@ -207,6 +207,7 @@ static void handle_frame(const link_hdr_t *h) {
         return;
     }
     n_zram_block++;
+    bool want_snapshot = link_rx_hdr(&session)->arg1 != 0;
     if (link_rx_hdr(&session)->arg0) {
         if (!link_s_bulk_recv(&session, zram_bitmap, LINK_ZRAM_BYTES / 8) ||
             !link_s_bulk_recv(&session, zram_block, LINK_ZRAM_BYTES)) {
@@ -231,7 +232,7 @@ static void handle_frame(const link_hdr_t *h) {
 
     slave_sound_run_frame(events, count, (int)audio_target, &reply);
 
-    reply.zram_bytes = LINK_ZRAM_BYTES;
+    reply.zram_bytes = want_snapshot ? LINK_ZRAM_BYTES : 0;
     reply.overflows  = frame_overflows;
 
     if (!link_s_send_ctrl(&session, LINK_OP_FRAME_ACK, 0, 0,
@@ -249,7 +250,9 @@ static void handle_frame(const link_hdr_t *h) {
         link_s_bulk_send(&session, slave_sn76489_buffer_mem,
                          reply.sn_samples * sizeof(int16_t));
     }
-    link_s_bulk_send(&session, slave_zram(), LINK_ZRAM_BYTES);
+    if (reply.zram_bytes) {
+        link_s_bulk_send(&session, slave_zram(), LINK_ZRAM_BYTES);
+    }
 }
 
 static void handle_rom_chunk(const link_hdr_t *h) {
@@ -398,6 +401,14 @@ int main(void) {
     session.link    = &link;
     session.ctrl_tx = ctrl_tx;
     session.ctrl_rx = ctrl_rx;
+
+    /* Fail fast. The master allows each in-frame handshake step 100 ms;
+     * leaving the slave on the 2 s default means that when one step goes
+     * wrong the master gives up and moves on while the slave is still
+     * waiting — and every exchange until that 2 s expires fails too. One
+     * glitch becomes seconds of stalled audio. Symmetric patience turns
+     * the same glitch into a single dropped frame. */
+    session.handshake_timeout_us = 100000;
 
     printf("Link: PIO0 claimed, %lu KiB/s\n",
            (unsigned long)(link_byte_rate(&link) / 1024));
