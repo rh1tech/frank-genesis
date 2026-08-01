@@ -19,7 +19,7 @@ event stream equivalent to running the chips inline.
 
 | What | Site |
 |---|---|
-| Z80 RAM write | `bus.c:604` (+16-bit variant) |
+| Z80 RAM write | `bus.c:604` — sent as a **block**, not events (see below) |
 | `YM2612Write` | `bus.c:610`, 16-bit path ~`:700` |
 | `SN76489_Write` | `bus.c:619`, `:700`, `vdp_mem.c:896` |
 | BUSREQ / RESET | `bus.c:600` → `z80_write_ctrl` |
@@ -31,7 +31,7 @@ event stream equivalent to running the chips inline.
 
 | What | Site | Resolution |
 |---|---|---|
-| `ZRAM[addr]` read | `bus.c:484` | per-frame 8 KB snapshot + write journal |
+| `ZRAM[addr]` read | `bus.c:484` | per-frame 8 KB snapshot + dirty bitmap |
 | `YM2612Read()` | `bus.c:487` | master-side timer shadow |
 | `z80_read_ctrl()` | `bus.c:480` | **free** — pure master-side state |
 
@@ -74,14 +74,14 @@ frame N   core0: 68K + VDP run, events -> ring
           core1: ship frame N events
                  collect frame N-1 samples -> I2S
 
-slave     replay frame N-1 stream in timestamp order
-          Z80 + YM + PSG + mix -> 888 stereo samples
+slave     replay the stream in timestamp order
+          Z80 + YM + PSG -> 888 samples per chip, mono
           snapshot 8 KB Z80 RAM
 ```
 
-Added audio latency is one frame (~16.7 ms) on top of the existing
-double-buffering. This is sound only — video and input are untouched, so
-control latency does not change.
+In practice this adds **no latency at all** over the single-chip build:
+core 1 already submitted frame N's audio while core 0 emulated frame
+N+1, and the exchange simply happens inside that existing window.
 
 The lag is safe precisely because the Z80 can influence the 68K through
 only two channels, ZRAM contents and YM status, and both are made
@@ -97,14 +97,29 @@ elapsed cycles. No FM synthesis is involved, so the master runs a small
 timer model fed by the same writes it is already forwarding and answers
 locally. No round trip.
 
-### 68K reads of Z80 RAM — snapshot plus journal
+### 68K reads of Z80 RAM — snapshot plus dirty bitmap
 
 The slave ships all 8 KB of Z80 RAM back each frame. The master cannot
 simply overwrite its mirror with it: the snapshot was taken at a known
-emulated timestamp, and the 68K has since written bytes of its own. So the
-master keeps a small journal of its post-snapshot ZRAM writes and replays
-them over each incoming snapshot. It never reads back its own stale bytes,
-and Z80-authored bytes are at most one frame old.
+emulated timestamp, and the 68K has since written bytes of its own. A
+dirty bitmap records which bytes the master wrote since the last merge;
+those keep the master's value and everything else takes the slave's. It
+never reads back its own stale bytes, and Z80-authored bytes are at most
+one frame old.
+
+### 68K *writes* to Z80 RAM — also a block, not events
+
+Streaming them as events fails: a game uploading its sound driver writes
+8 KB in a single frame, which overruns any sane event ring and truncates
+the upload. They accumulate in the mirror with a per-frame dirty bitmap
+and travel as one block; the slave applies only the marked bytes, so
+bytes its own Z80 wrote survive. Ordering is safe because the 68K holds
+BUSREQ across the upload, so the Z80 is halted throughout.
+
+Both dirty bitmaps are **double-buffered and flipped with the event
+ring**. With a single map, core 0 keeps writing while core 1 sends, and
+clearing it afterwards silently discards any byte marked during the
+send.
 
 A driver-ready flag polled by the 68K therefore resolves up to one frame
 later than on hardware. The polling loop still terminates; it just spins
@@ -118,7 +133,7 @@ Against 48 MB/s per direction, measured error-free on this board:
 |---|---|---|
 | Event stream (worst case ~2000 events × 8 B) | 16 KB | 0.96 MB/s |
 | Z80 RAM snapshot | 8 KB | 0.49 MB/s |
-| Mixed stereo audio (888 × 2 × 2 B) | 3.5 KB | 0.21 MB/s |
+| Audio: two mono buffers (2 × 888 × 2 B) | 3.5 KB | 0.21 MB/s |
 | **Total** | **~28 KB** | **~1.7 MB/s (3.5%)** |
 
 The link is not the constraint anywhere. ROM upload at load time is bound
@@ -148,9 +163,11 @@ but C2 has no pad header and never initialises it.
 - `z80_mem_opt.S` calls `YM2612Write` directly from assembly. That is
   fine: **on C2 the master does not compile the Z80 at all**, and the
   slave uses the same assembly verbatim.
-- If the slave does not answer at boot, the C2 master falls back to the
-  local backend and plays sound itself, exactly as M1/M2 do. A C2 board
-  with an unflashed slave is degraded, not silent.
+- There is **no local fallback on C2**: the seam is compile-time, so a
+  C2 master with an unresponsive slave runs silently rather than
+  emulating the chips itself. It keeps probing once a second and
+  re-uploads the ROM automatically when the slave reappears, so a
+  rebooted or reflashed slave heals without reloading the game.
 
 ## Build layout
 
