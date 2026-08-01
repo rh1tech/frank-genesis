@@ -24,7 +24,12 @@
 #ifndef SOUND_BACKEND_H
 #define SOUND_BACKEND_H
 
-#ifdef BOARD_C2
+/* C2 normally offloads sound to the slave. Building with
+ * -DC2_LOCAL_SOUND=1 keeps the chips on the master instead, so the same
+ * board, DAC and ROM can produce a reference recording to compare the
+ * offloaded path against. Not a shipping configuration — a measurement
+ * tool. */
+#if defined(BOARD_C2) && !defined(C2_LOCAL_SOUND)
 
 /* ---- C2: the sound subsystem is on the slave ---- */
 
@@ -45,7 +50,7 @@ void         sound_z80_irq(unsigned int level);
 void         sound_z80_run(int target);
 void         sound_frame_end(int audio_target_clock);
 
-#else /* !BOARD_C2 — M1, M2: run the chips inline, as always */
+#else /* M1, M2, or C2 with C2_LOCAL_SOUND: run the chips inline */
 
 #include "gwenesis_sn76489.h"
 #include "ym2612.h"

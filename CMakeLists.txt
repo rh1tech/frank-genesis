@@ -191,7 +191,11 @@ set(MASTER_SOURCES
 
 # C2 offloads the whole sound subsystem to the slave, so the master also
 # carries its half of the link.
-if(BOARD_VARIANT STREQUAL "C2")
+# C2_LOCAL_SOUND builds the C2 master with the chips still on the master,
+# for A/B comparison against the offloaded path on identical hardware.
+set(C2_LOCAL_SOUND "0" CACHE STRING "C2: run sound locally instead of on the slave")
+
+if(BOARD_VARIANT STREQUAL "C2" AND NOT C2_LOCAL_SOUND)
     list(APPEND MASTER_SOURCES src/link_master.c src/sound_backend_link.c)
 endif()
 
@@ -227,6 +231,7 @@ target_compile_definitions(frank-genesis PRIVATE
     VDP_GFX_DISABLE_LOGGING=1
     ENABLE_LOGGING=${ENABLE_LOGGING}
     AUTOBOOT_LAST_ROM=${AUTOBOOT_LAST_ROM}
+    $<$<BOOL:${C2_LOCAL_SOUND}>:C2_LOCAL_SOUND=1>
     # M68K configuration (Genesis-Plus-GX)
     LSB_FIRST=1
     # I2S Audio configuration - use PIO0 to avoid conflict with HDMI on PIO1
@@ -300,7 +305,7 @@ target_link_libraries(frank-genesis
     ps2kbd
 )
 
-if(BOARD_VARIANT STREQUAL "C2")
+if(BOARD_VARIANT STREQUAL "C2" AND NOT C2_LOCAL_SOUND)
     target_link_libraries(frank-genesis link)
 endif()
 

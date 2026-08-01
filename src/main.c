@@ -51,8 +51,13 @@
 #include "usbhid/usbhid.h"
 #endif
 
-// C2 only: the sound subsystem lives on the second RP2350.
-#ifdef BOARD_C2
+// C2 only: the sound subsystem lives on the second RP2350, unless this
+// build keeps it local for reference measurements.
+#if defined(BOARD_C2) && !defined(C2_LOCAL_SOUND)
+#define USE_SOUND_LINK 1
+#endif
+
+#ifdef USE_SOUND_LINK
 #include "link_master.h"
 extern int16_t  link_ym_samples_buf[];
 extern int16_t  link_sn_samples_buf[];
@@ -593,7 +598,7 @@ static void __scratch_x("sound") sound_core(void) {
         __dmb();
         
         // Submit samples to I2S - samples were already generated during emulation
-#ifdef BOARD_C2
+#ifdef USE_SOUND_LINK
         // The sound subsystem lives on the slave. Ship this frame's
         // event stream and collect the chips' output, then hand it to
         // the same audio path M1/M2 use. Core 0 is already emulating the
@@ -1056,7 +1061,7 @@ static void __time_critical_func(emulation_loop)(void) {
         saved_ym_samples = ym2612_index;
         saved_sn_samples = sn76489_index;
         
-#ifndef BOARD_C2
+#ifndef USE_SOUND_LINK
         // Set read buffer pointers for Core 1 (current write buffer becomes read buffer)
         audio_read_sn76489 = gwenesis_sn76489_buffer;
         audio_read_ym2612 = gwenesis_ym2612_buffer;
@@ -1159,7 +1164,7 @@ int main(void) {
     LOG("========================================\n");
     LOG("System Clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 
-#ifdef BOARD_C2
+#ifdef USE_SOUND_LINK
     // Bring the inter-processor link up early: it only claims PIO2 and
     // two DMA channels, and doing it before the slave is probed means a
     // slave that boots late still finds a working wire waiting.
@@ -1361,7 +1366,7 @@ int main(void) {
         }
     }
     
-#ifdef BOARD_C2
+#ifdef USE_SOUND_LINK
     // Hand the ROM to the sound slave. Its Z80 reads the 68K address
     // space through the bank register, so it needs the whole image, not
     // just the driver. The buffer is already byte-swapped and the slave
