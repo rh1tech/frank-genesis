@@ -52,6 +52,10 @@ set(CRT_SCANLINES "1" CACHE STRING "CRT scanlines: 0=off, 1=on")
 # CRT dim brightness percentage (only used if CRT_SCANLINES=1)
 set(CRT_DIM_PERCENT "60" CACHE STRING "CRT dim line brightness: 0-100")
 
+# Development aid: boot the last-opened ROM without a keypress. Off by
+# default; only for iterating on behaviour that must be seen at runtime.
+set(AUTOBOOT_LAST_ROM "0" CACHE STRING "Boot last ROM automatically: 0=off, 1=on")
+
 # Logging (debug output via UART) - disable for release builds
 set(ENABLE_LOGGING "1" CACHE STRING "Enable debug logging: 0=off, 1=on")
 
@@ -222,6 +226,7 @@ target_compile_definitions(frank-genesis PRIVATE
     BUS_DISABLE_LOGGING=1
     VDP_GFX_DISABLE_LOGGING=1
     ENABLE_LOGGING=${ENABLE_LOGGING}
+    AUTOBOOT_LAST_ROM=${AUTOBOOT_LAST_ROM}
     # M68K configuration (Genesis-Plus-GX)
     LSB_FIRST=1
     # I2S Audio configuration - use PIO0 to avoid conflict with HDMI on PIO1

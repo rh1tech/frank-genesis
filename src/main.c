@@ -1326,6 +1326,21 @@ int main(void) {
     LOG("Showing ROM selector...\n");
     static char selected_rom[MAX_ROM_PATH];
     
+#if AUTOBOOT_LAST_ROM
+    /* Development aid, off by default: boot straight into the ROM the
+     * browser last opened, so a flash-and-test cycle needs no keypress.
+     * Only useful when iterating on something that has to be observed
+     * while a game runs. */
+    if (g_settings.browser_file[0]) {
+        snprintf(selected_rom, sizeof(selected_rom), "%s%s%s",
+                 g_settings.browser_path,
+                 g_settings.browser_path[0] &&
+                 g_settings.browser_path[strlen(g_settings.browser_path) - 1] != '/'
+                     ? "/" : "",
+                 g_settings.browser_file);
+        LOG("Autoboot: %s\n", selected_rom);
+    } else
+#endif
     if (!rom_selector_show(selected_rom, sizeof(selected_rom), (uint8_t *)SCREEN)) {
         LOG("No ROM selected!\n");
         while (1) {

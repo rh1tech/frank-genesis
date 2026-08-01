@@ -389,6 +389,22 @@ static inline void cpacr_ensure(void) {
 void sound_frame_end(int audio_target_clock) {
     cpacr_ensure();
 
+    /* The YM timer shadow runs on the same per-frame cycle base as the
+     * chips: main.c zeroes system_clock, zclk, ym2612_clock and
+     * sn76489_clock at the top of every frame, so m68k_cycles_master()
+     * counts 0..896040 within a frame and then restarts.
+     *
+     * Leaving ym.clock at the end of the previous frame makes
+     * ym_shadow_run() take its `target <= ym.clock` early return for the
+     * whole of the next frame, and every frame after — the timer flags
+     * freeze at whatever they were. A 68K polling YM status for timer
+     * overflow then spins or branches wrongly, which is how a stuck
+     * title card and a run-away PC come out of a sound-only change.
+     *
+     * Exactly the bug that stopped the slave's Z80 after one frame, in
+     * the one other place a cycle count is accumulated across frames. */
+    ym.clock = 0;
+
     /* Hand the finished buffer to core 1 and start filling the other.
      * If core 1 has not drained the previous one yet the emulator is
      * outrunning the slave; dropping this frame's events would
