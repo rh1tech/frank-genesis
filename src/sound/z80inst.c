@@ -96,6 +96,17 @@ void z80_start() {
     reset_once=0;
     bus_ack=0;
     zclk=0;
+    /* The bank register is part of the Z80 subsystem's reset state.
+     *
+     * It is BSS, so on the master it happens to be zero for the first
+     * game and nobody noticed it is never cleared. The C2 slave does not
+     * reboot between ROM loads, so it inherited the previous game's
+     * bank: its Z80 then read ROM through the wrong 32 KB window from
+     * the very first frame, took a different branch, and diverged —
+     * while every register and the cycle count still matched exactly,
+     * which is what made this so hard to see. Loading a second game on
+     * the master without a reboot has the same latent bug. */
+    Z80_BANK = 0;
     z80_bank_cache_tags[0] = -1;  /* Invalidate cache on start */
     z80_bank_cache_tags[1] = -1;
     z80_bank_cache_lru = 0;
@@ -111,7 +122,19 @@ void z80_pulse_reset() {
 /* External Z80 enable flag from main.c */
 extern bool z80_enabled;
 
+/* Z80 cycles actually asked for and actually executed, cumulative.
+ * Shared by both halves, so master-local and slave-side rates can be
+ * compared directly: a slave that executes fewer cycles per frame is a
+ * music driver that ticks slower. */
+#ifdef SOUND_CAPTURE
+uint32_t z80_cycles_req, z80_cycles_exec, z80_run_calls;
+#define Z80_COUNT(x) do { x; } while (0)
+#else
+#define Z80_COUNT(x) do { } while (0)
+#endif
+
 void z80_run(int target) {
+    Z80_COUNT(z80_run_calls++);
 
   // Skip Z80 execution if disabled (for performance)
   if (!z80_enabled) {
@@ -146,6 +169,8 @@ void z80_run(int target) {
     }
 
     int cycles_to_run = current_timeslice / Z80_FREQ_DIVISOR;
+    Z80_COUNT(z80_cycles_req += (uint32_t)cycles_to_run);
+    Z80_COUNT(z80_cycles_exec += (uint32_t)cycles_to_run);
 #if Z80_BENCHMARK
     uint64_t bench_start = z80_benchmark_start();
 #endif
@@ -162,7 +187,40 @@ void z80_run(int target) {
 #endif
   }
 
+  Z80_COUNT(z80_cycles_exec -= (uint32_t)rem);
   zclk = target - rem * Z80_FREQ_DIVISOR;
+}
+
+/* Per-frame signature of the Z80's architectural state.
+ *
+ * The point is differential testing: the same ROM run with the Z80 on
+ * the master (known good) and on the slave must produce the same
+ * sequence of these. The first frame where they differ localises the
+ * divergence exactly, instead of inferring a cause from how the audio
+ * sounds. Registers plus the bank register only — no host pointers or
+ * cycle counters, which legitimately differ between the two builds. */
+uint32_t z80_state_signature(void) {
+    uint32_t h = 2166136261u;
+#define SIGMIX(v) do { h ^= (uint32_t)(v); h *= 16777619u; } while (0)
+    SIGMIX(cpu.PC.W);  SIGMIX(cpu.SP.W);
+    SIGMIX(cpu.AF.W);  SIGMIX(cpu.BC.W);
+    SIGMIX(cpu.DE.W);  SIGMIX(cpu.HL.W);
+    SIGMIX(cpu.IX.W);  SIGMIX(cpu.IY.W);
+    SIGMIX(cpu.AF1.W); SIGMIX(cpu.BC1.W);
+    SIGMIX(cpu.DE1.W); SIGMIX(cpu.HL1.W);
+    SIGMIX(cpu.IFF);   SIGMIX(cpu.I);
+    SIGMIX(Z80_BANK);
+#undef SIGMIX
+    return h;
+}
+
+void z80_state_regs(uint32_t out[6]) {
+    out[0] = (uint32_t)cpu.PC.W | ((uint32_t)cpu.SP.W << 16);
+    out[1] = (uint32_t)cpu.AF.W | ((uint32_t)cpu.BC.W << 16);
+    out[2] = (uint32_t)cpu.DE.W | ((uint32_t)cpu.HL.W << 16);
+    out[3] = (uint32_t)cpu.IX.W | ((uint32_t)cpu.IY.W << 16);
+    out[4] = (uint32_t)Z80_BANK;
+    out[5] = (uint32_t)zclk;
 }
 
 void z80_sync(void) {

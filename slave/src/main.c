@@ -95,8 +95,11 @@ static uint8_t __attribute__((aligned(4))) rom_chunk[LINK_ROM_CHUNK_BYTES];
 /* Step counters, so a failed upload says which step failed rather than
  * just leaving rom_received_bytes at zero. */
 uint32_t n_hello, n_rom_begin, n_rom_chunk, n_rom_chunk_bulkfail;
+uint32_t n_sync;
 uint32_t n_rom_end, n_frame, n_zram_block, n_zram_bulkfail, n_ev_bulkfail;
 uint32_t last_chunk_off, last_chunk_len;
+
+uint32_t rom_crc_ours, rom_crc_master, rom_crc_mismatches;
 
 static uint32_t rom_expected_bytes;
 static uint32_t rom_received_bytes;
@@ -191,6 +194,11 @@ static void fill_node_info(link_node_info_t *info) {
 static uint32_t __attribute__((aligned(4))) zram_bitmap[LINK_ZRAM_BYTES / 32];
 static uint8_t  __attribute__((aligned(4))) zram_block[LINK_ZRAM_BYTES];
 
+/* Applied when the replay reaches LINK_EV_ZRAM_APPLY, not on arrival. */
+bool            slave_zram_pending;
+const uint32_t *slave_zram_bitmap_p = zram_bitmap;
+const uint8_t  *slave_zram_block_p  = zram_block;
+
 static void handle_frame(const link_hdr_t *h) {
     uint32_t count = h->arg0;
     uint32_t audio_target = h->arg1;
@@ -203,6 +211,7 @@ static void handle_frame(const link_hdr_t *h) {
     /* The master follows every FRAME with a ZRAM_BLOCK control frame
      * saying whether its 68K touched Z80 RAM this frame. Driver uploads
      * are 8 KB of byte writes; as events they would swamp the ring. */
+    slave_zram_pending = false;
     if (link_s_wait_ctrl(&session, LINK_CTRL_TIMEOUT_US) != LINK_OP_ZRAM_BLOCK) {
         return;
     }
@@ -214,7 +223,7 @@ static void handle_frame(const link_hdr_t *h) {
             n_zram_bulkfail++;
             return;
         }
-        slave_zram_apply(zram_bitmap, zram_block);
+        slave_zram_pending = true;
     }
 
     /* Events arrive as one bulk transfer straight after the header. */
@@ -333,6 +342,16 @@ static void serve_one(void) {
         /* CRC the image as stored, so a corrupted upload is caught here
          * rather than as mysteriously wrong music later. */
         uint32_t crc = link_crc32(PSRAM_BASE, rom_received_bytes);
+
+        /* The master rejects the upload if this disagrees with its own
+         * CRC, and retries — so a CRC that is intermittently wrong shows
+         * up as an endless re-upload loop rather than as a bad ROM.
+         * Record both values to tell a transfer fault from a PSRAM
+         * readback fault. */
+        rom_crc_ours   = crc;
+        rom_crc_master = h->arg0;
+        if (crc != h->arg0) rom_crc_mismatches++;
+
         slave_sound_reset();
         link_s_send_ctrl(&session, LINK_OP_ROM_END_ACK, crc,
                          rom_received_bytes, NULL, 0);
@@ -343,6 +362,27 @@ static void serve_one(void) {
         n_frame++;
         handle_frame(h);
         break;
+
+    case LINK_OP_SYNC: {
+        /* Mid-frame: replay what the master has emitted so far, then
+         * answer with the Z80 RAM byte it is about to read. Keeps the
+         * 68K's view of the sound driver's replies in step with the
+         * single-chip build, where the Z80 has already run this far. */
+        uint32_t count  = h->arg0;
+        uint16_t offset = (uint16_t)(h->arg1 & (LINK_ZRAM_BYTES - 1));
+        n_sync++;
+
+        if (count > LINK_MAX_EVENTS) count = LINK_MAX_EVENTS;
+        if (count && !link_s_bulk_recv(&session, events,
+                                       count * sizeof(link_event_t))) {
+            n_ev_bulkfail++;
+            break;
+        }
+        slave_sound_chunk(events, count);
+        link_s_send_ctrl(&session, LINK_OP_SYNC_ACK,
+                         slave_zram_peek(offset), 0, NULL, 0);
+        break;
+    }
 
     default:
         break;

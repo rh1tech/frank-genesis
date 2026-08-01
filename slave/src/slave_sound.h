@@ -43,6 +43,13 @@ void slave_sound_config(const link_sound_config_t *cfg);
 /* Replay one frame's events, then render the frame's audio.
  * Fills reply->ym_samples / sn_samples; the buffers themselves are
  * slave_ym2612_buffer_mem and slave_sn76489_buffer_mem. */
+/* Replay a mid-frame chunk. Starts the frame if this is its first
+ * communication, so the per-frame clock reset happens exactly once
+ * whether or not the master needed to synchronise early. */
+uint32_t slave_zram_peek(unsigned int offset);
+
+void slave_sound_chunk(const link_event_t *events, uint32_t count);
+
 void slave_sound_run_frame(const link_event_t *events, uint32_t count,
                            int audio_target_clock,
                            link_frame_reply_t *reply);

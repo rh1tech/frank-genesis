@@ -68,6 +68,22 @@ enum {
      * rather than as thousands of events. */
     LINK_OP_ZRAM_BLOCK   = 0x0032,
 
+    /* Mid-frame synchronisation.
+     *
+     * The 68K reads Z80 RAM to see what the sound driver has answered.
+     * On one chip it sees the Z80's writes as of the last slice the Z80
+     * was run for, within the same frame. Batching a whole frame to the
+     * slave cannot reproduce that: the slave only replays frame N after
+     * the master has finished it, so its Z80 writes arrive a frame late
+     * and the 68K spins on a byte that never changes.
+     *
+     * SYNC ships the events emitted so far this frame and asks the slave
+     * to replay them now; the ack carries the requested Z80 RAM byte as
+     * of that point. arg0 = event count to follow, arg1 = byte offset.
+     * Measured at ~0.3 reads per frame, so this is rare. */
+    LINK_OP_SYNC         = 0x0034,
+    LINK_OP_SYNC_ACK     = 0x0035,  /* S->M: arg0 = the byte             */
+
     LINK_OP_PING         = 0x0040,  /* M->S: liveness / latency probe     */
     LINK_OP_PONG         = 0x0041,
 };
@@ -107,6 +123,13 @@ enum {
     LINK_EV_RESET_LINE   = 0x06,  /* val = 1 released, 0 asserted         */
     LINK_EV_IRQ          = 0x07,  /* val = 1 assert, 0 clear              */
     LINK_EV_RUN_UNTIL    = 0x08,  /* time marker: run the Z80 to `cycles` */
+    LINK_EV_ZRAM_APPLY   = 0x09,  /* apply the frame's ZRAM block here.
+                                   * Emitted at the cycle of the first
+                                   * write that overflowed the event
+                                   * budget, so the block's bytes land
+                                   * at the point in the frame they were
+                                   * actually written rather than before
+                                   * the Z80 has run at all.            */
 };
 
 typedef struct __attribute__((packed)) {
@@ -167,6 +190,18 @@ typedef struct __attribute__((packed)) {
     uint32_t overflows;        /* frames whose event list was truncated */
     uint32_t ym_status;        /* the real chip's status byte, for auditing
                                 * the master's timer shadow against it   */
+    /* Where the Z80 reached outside anything the slave can serve. The
+     * region decides the fix: 68K work RAM wants a mirror, I/O or VDP
+     * would want something else entirely. */
+    /* Packed Z80 registers for the differential test: pc|sp, af|bc,
+     * de|hl, ix|iy, bank, zclk. A hash says the two diverged; this says
+     * which register did. */
+    uint32_t z80_dbg[6];
+    uint32_t z80_sig;          /* per-frame Z80 state signature, for the
+                                * differential test against the master  */
+    uint32_t foreign_last_addr;
+    uint32_t foreign_min_addr;
+    uint32_t foreign_max_addr;
 } link_frame_reply_t;
 
 /* Z80 RAM is 8 KB; the snapshot is the whole thing. */
@@ -184,9 +219,14 @@ typedef struct __attribute__((packed)) {
 #define LINK_MAX_EVENTS     4096u
 #define LINK_EVENT_BYTES    (LINK_MAX_EVENTS * sizeof(link_event_t))
 
-/* ROM upload chunk. 32 KiB matches the Z80 bank size and keeps both a
- * send and a landing buffer comfortably in SRAM. */
-#define LINK_ROM_CHUNK_BYTES (32u * 1024u)
+/* ROM upload chunk.
+ *
+ * 16 KiB, not the Z80 bank size of 32 KiB: both halves now stage chunks
+ * through SRAM rather than letting DMA touch the PSRAM XIP window, and
+ * the master cannot spare 32 KiB of static buffer on top of the
+ * emulator's own footprint. Only affects how many handshakes a one-time
+ * upload costs. */
+#define LINK_ROM_CHUNK_BYTES (16u * 1024u)
 
 /* The PIO FIFOs are 32 bits wide and autopull/autopush are word-sized,
  * so every bulk length must be a whole number of words. Sample counts

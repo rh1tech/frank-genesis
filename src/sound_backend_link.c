@@ -39,25 +39,52 @@ extern int m68k_cycles_master(void);
  * Event production
  * ===================================================================== */
 
+static bool frame_in_flight;
+uint32_t zram_block_fallbacks;
+/* A driver upload is thousands of byte writes in one frame. Letting
+ * those into the ring truncates the tail of the SAME frame's RUN_UNTIL
+ * and IRQ events, which is far worse than mis-ordering an upload the
+ * Z80 is held out of anyway: it desynchronises the Z80's schedule. Cap
+ * what ZRAM may take and spill the rest to the block. */
+#define ZRAM_EV_BUDGET 1024u
+static uint32_t zram_ev_frame;
+static bool     zram_apply_marked;
 static link_event_t events[2][LINK_MAX_EVENTS];
 static uint32_t     event_count[2];
+/* Mid-frame flush.
+ *
+ * With the slave able to replay a partial frame, the event ring no
+ * longer has to hold a whole frame: when it fills, hand it over and
+ * carry on. That removes the bulk Z80 RAM block the driver upload used
+ * to need (8 KB of byte writes against a 4096-event ring), and with it
+ * the ordering hazard of a block that arrives after the events which
+ * reference it. */
+uint32_t link_mirror_waits, link_mirror_wait_us, link_mirror_timeouts;
+uint32_t link_sync_us;
+extern uint32_t link_syncs, link_sync_fails;
+volatile uint32_t core0_frame;                 /* frame core 0 is running */
+volatile uint32_t mirror_gen = 0xFFFFFFFFu;    /* last frame merged in */
+static bool link_flush_chunk(uint16_t peek_off, uint8_t *out);
+
 static volatile int event_write;      /* buffer core 0 is filling */
 static uint32_t     event_overflows;
 
 /* Per-type totals, for working out what actually fills a frame. */
 uint32_t sound_link_ev_stats[16];
 
-static inline void emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
+static inline bool emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
     uint32_t n = event_count[event_write];
 
     sound_link_ev_stats[type & 15]++;
 
-    /* Truncate rather than wrap. Losing the tail of one frame's writes
-     * degrades that frame's sound; wrapping would reorder the stream and
-     * desynchronise the chips for every frame after it. */
+    /* Full: hand the buffer over and keep going, rather than truncating
+     * the tail of the frame. */
     if (n >= LINK_MAX_EVENTS) {
-        event_overflows++;
-        return;
+        if (!link_flush_chunk(0, NULL)) {
+            event_overflows++;
+            return false;
+        }
+        n = event_count[event_write];
     }
 
     link_event_t *e = &events[event_write][n];
@@ -66,7 +93,61 @@ static inline void emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
     e->val    = val;
     e->addr   = addr;
     event_count[event_write] = n + 1;
+    return true;
 }
+
+/* Core 0 drives the link here, mid-frame. That is safe only while core 1
+ * is not using it, which is exactly the window after it has finished the
+ * previous frame's exchange — the same condition the mirror needed. */
+static bool link_core1_idle(void) {
+    if (core0_frame == 0) return true;
+    uint32_t need = core0_frame - 1;
+    if ((int32_t)(mirror_gen - need) >= 0) return true;
+
+    uint64_t t0 = time_us_64();
+    link_mirror_waits++;
+    while ((int32_t)(mirror_gen - need) < 0) {
+        if (time_us_64() - t0 > 20000) {      /* slave gone: do not hang */
+            link_mirror_timeouts++;
+            link_mirror_wait_us += (uint32_t)(time_us_64() - t0);
+            return false;
+        }
+        tight_loop_contents();
+    }
+    link_mirror_wait_us += (uint32_t)(time_us_64() - t0);
+    return true;
+}
+
+static bool link_flush_chunk(uint16_t peek_off, uint8_t *out) {
+    if (!link_master_connected()) return false;
+    if (!link_core1_idle())       return false;
+    if (!link_master_connected()) return false;
+
+    int      w  = event_write;
+    uint32_t n  = event_count[w];
+    uint64_t t0 = time_us_64();
+
+    if (!link_master_sync_peek(events[w], n, peek_off, out)) return false;
+
+    event_count[w] = 0;          /* handed over; start filling again */
+    link_syncs++;
+    link_sync_us += (uint32_t)(time_us_64() - t0);
+    return true;
+}
+
+/* Mirror freshness. The 68K polls Z80 RAM for the sound driver's replies,
+ * and the slave only produces frame N's Z80 writes after the master has
+ * finished frame N — so the mirror is inherently behind. Measured on the
+ * local-sound build: a mirror holding the *previous* frame's end state
+ * answers every read correctly until frame 154, while a two-frame-old one
+ * first lies at frame 108 — exactly where the two builds diverge.
+ *
+ * Core 0 runs a frame ahead of core 1, so without help the mirror is two
+ * frames old whenever a read lands early in a frame. These let a read
+ * wait for the one-frame-old state it needs. Reads are rare (0.3 per
+ * frame measured), so the stall is rare too. */
+static   uint32_t pending_frame_no;
+static   uint32_t inflight_frame_no;
 
 /* =====================================================================
  * Z80 RAM mirror
@@ -116,15 +197,47 @@ uint32_t        zram_dirty_bytes;          /* cumulative, for diagnosis */
  * these writes (that is what the BUSREQ events are), so the Z80 is
  * halted while they happen and cannot observe the difference between
  * applying them per-write and applying them at frame start. */
+#ifdef SOUND_CAPTURE
+/* Tests the assumption above: a write made while the Z80 is NOT halted
+ * IS observable, because the slave only applies the block at a frame
+ * boundary while the master applies it at the cycle it happened. */
+uint32_t link_zram_w_total, link_zram_w_unsafe;
+uint32_t link_zram_w_unsafe_first = 0xFFFFFFFFu;
+static int z80_bus_ack;   /* tentative decl; defined below */
+#endif
+
 void sound_zram_write(unsigned int offset, unsigned int value) {
     offset &= (LINK_ZRAM_BYTES - 1);
 
-    int w = zram_dirty_write;
+#ifdef SOUND_CAPTURE
+    link_zram_w_total++;
+    if (!z80_bus_ack) {
+        extern uint32_t snd_cap_count;
+        if (link_zram_w_unsafe == 0) link_zram_w_unsafe_first = snd_cap_count;
+        link_zram_w_unsafe++;
+    }
+#endif
 
+    /* The mirror answers the 68K's own reads, so it is updated either
+     * way. */
     zram_mirror[offset] = (uint8_t)value;
-    zram_dirty[offset >> 5]          |= 1u << (offset & 31);
-    zram_dirty_buf[w][offset >> 5]   |= 1u << (offset & 31);
-    zram_any[w] = true;
+    zram_dirty[offset >> 5] |= 1u << (offset & 31);
+
+    /* Timestamped, like every other access through this seam. The block
+     * path applies a whole frame's writes at once, before the slave
+     * replays anything — so the slave's Z80 saw them from cycle 0 of the
+     * frame while the master's only saw them at the cycle the 68K got
+     * round to writing. Sending them in-stream removes that skew.
+     *
+     * The block stays as the fallback for the one case it was built
+     * for: a driver upload is 8 KB of byte writes in a single frame and
+     * would truncate the ring. Losing ordering on a bulk upload is
+     * harmless — the Z80 is held in reset across it — whereas losing
+     * the tail of the stream is not. */
+    if (!emit(LINK_EV_ZRAM_WRITE, (uint16_t)offset, (uint8_t)value,
+              m68k_cycles_master())) {
+        zram_block_fallbacks++;          /* link down: nothing to do */
+    }
     zram_dirty_bytes++;
 }
 
@@ -133,6 +246,12 @@ void sound_zram_write(unsigned int offset, unsigned int value) {
  * answered from a mirror that is up to a frame stale in both
  * directions, which is the remaining way this split can go wrong. */
 uint32_t link_zram_reads;
+#ifdef SOUND_CAPTURE
+/* Frame index of the very first 68K read of Z80 RAM. The mirror those
+ * reads come from is only refreshed once per frame, so if this lands on
+ * the frame the two runs start to diverge, the staleness is the cause. */
+uint32_t link_zram_first_frame = 0xFFFFFFFFu;
+#endif
 volatile bool zram_read_since_snapshot = true;   /* ask once at startup */
 uint16_t link_zram_hot_addr;
 uint32_t link_zram_hot_hits;
@@ -140,6 +259,28 @@ uint32_t link_zram_hot_hits;
 unsigned int sound_zram_read(unsigned int offset) {
     offset &= (LINK_ZRAM_BYTES - 1);
 
+    /* Answer as of *now*, not from a frame-old mirror: ship what this
+     * frame has emitted so far and read the byte back from the slave,
+     * whose Z80 has then run exactly as far as the master's would have. */
+    {
+        uint8_t val = 0;
+        if (link_flush_chunk((uint16_t)offset, &val)) {
+            zram_mirror[offset] = val;
+            link_zram_reads++;
+            return val;
+        }
+    }
+#ifdef SOUND_CAPTURE
+    { extern uint32_t seam_frame; extern uint16_t seam_zram_reads[];
+      if (seam_frame < 512) seam_zram_reads[seam_frame]++; }
+#endif
+
+#ifdef SOUND_CAPTURE
+    if (link_zram_reads == 0) {
+        extern uint32_t snd_cap_count;
+        link_zram_first_frame = snd_cap_count;
+    }
+#endif
     link_zram_reads++;
     zram_read_since_snapshot = true;
     if (offset == link_zram_hot_addr) {
@@ -349,6 +490,7 @@ void sound_psg_write(unsigned int value, int cycles) {
  * hard, and a round trip here would dominate the link. */
 static int z80_bus_ack;
 static int z80_reset_held;
+static int last_run_until;
 
 void sound_z80_ctrl_write(unsigned int address, unsigned int value) {
     /* Exact addresses, exactly as z80inst.c's z80_write_ctrl() decodes
@@ -377,6 +519,28 @@ void sound_z80_ctrl_write(unsigned int address, unsigned int value) {
 }
 
 unsigned int sound_z80_ctrl_read(unsigned int address) {
+#ifdef SOUND_CAPTURE
+    { extern uint32_t seam_frame; extern uint16_t seam_ctrl_reads[];
+      if (seam_frame < 512) seam_ctrl_reads[seam_frame]++; }
+#endif
+    /* z80_read_ctrl() starts with z80_sync(), so on the master every 68K
+     * poll of BUSREQ or RESET advances the Z80 to the current cycle.
+     * Answering from a local flag without emitting anything left the
+     * slave's Z80 running a different number of cycles per frame — the
+     * differential trace showed the two diverging and re-converging
+     * rather than drifting, which is the signature of a scheduling
+     * difference rather than bad data.
+     *
+     * Emit the same time marker the master's sync would have produced.
+     * Deduplicated against the last one, because games poll these
+     * addresses in tight loops and an event per poll would swamp the
+     * ring for no benefit — only an advance in time carries meaning. */
+    int now = m68k_cycles_master();
+    if (now > last_run_until) {
+        last_run_until = now;
+        emit(LINK_EV_RUN_UNTIL, 0, 0, now);
+    }
+
     address &= 0xFFFF;
     if (address == 0x1100) return z80_bus_ack ? 0 : 1;
     if (address == 0x1101) return 0x00;
@@ -392,6 +556,7 @@ void sound_z80_irq(unsigned int level) {
 void sound_z80_run(int target) {
     /* Pure time marker: it is what reproduces the master's Z80
      * scheduling on the slave. */
+    if (target > last_run_until) last_run_until = target;
     emit(LINK_EV_RUN_UNTIL, 0, 0, target);
 }
 
@@ -434,6 +599,7 @@ uint16_t link_audio_last_peak;
 
 static volatile int      pending_buffer = -1;   /* buffer awaiting send */
 static volatile uint32_t pending_target;
+
 static volatile bool     pending_zram;
 static uint32_t          frame_seq;
 
@@ -473,6 +639,9 @@ void sound_frame_end(int audio_target_clock) {
      * Exactly the bug that stopped the slave's Z80 after one frame, in
      * the one other place a cycle count is accumulated across frames. */
     ym.clock = 0;
+    last_run_until = 0;
+    zram_ev_frame  = 0;
+    zram_apply_marked = false;
 
     /* Hand the finished buffer to core 1 and start filling the other.
      * If core 1 has not drained the previous one yet the emulator is
@@ -484,6 +653,7 @@ void sound_frame_end(int audio_target_clock) {
     int zw = zram_dirty_write;
 
     pending_target   = (uint32_t)audio_target_clock;
+    pending_frame_no = core0_frame++;
     pending_zram     = zram_any[zw];
     zram_frame_dirty = zram_dirty_buf[zw];
     pending_buffer   = event_write;
@@ -558,6 +728,8 @@ bool sound_link_exchange(void) {
         }
 
         pending_buffer = -1;
+        frame_in_flight = false;
+        mirror_gen = core0_frame;      /* release readers; link is down */
         link_ym_sample_count = 0;
         link_sn_sample_count = 0;
         return false;
@@ -565,12 +737,43 @@ bool sound_link_exchange(void) {
 
     uint64_t t_start = time_us_64();
 
-    bool ok = link_master_frame(events[buf], event_count[buf],
-                                pending_zram, (int)pending_target, ++frame_seq,
-                                link_ym_samples_buf, link_sn_samples_buf,
-                                (uint32_t *)&link_ym_sample_count,
-                                (uint32_t *)&link_sn_sample_count,
-                                zram_merge);
+    /* Collect the frame sent last time before shipping this one: the
+     * slave has had a whole frame of master emulation to produce it, so
+     * this normally returns immediately instead of blocking core 1 for
+     * the slave's compute. */
+    bool ok = true;
+    if (frame_in_flight) {
+        ok = link_master_frame_collect(link_ym_samples_buf, link_sn_samples_buf,
+                                       (uint32_t *)&link_ym_sample_count,
+                                       (uint32_t *)&link_sn_sample_count,
+                                       zram_merge);
+        frame_in_flight = false;
+        if (ok) { __dmb(); mirror_gen = inflight_frame_no; }
+    } else {
+        link_ym_sample_count = 0;
+        link_sn_sample_count = 0;
+        ok = false;              /* first frame: nothing to play yet */
+    }
+
+    if (link_master_connected() &&
+        link_master_frame_send(events[buf], event_count[buf],
+                               pending_zram, (int)pending_target, ++frame_seq)) {
+        frame_in_flight = true;
+        inflight_frame_no = pending_frame_no;
+    }
+
+#if !LINK_PIPELINE
+    /* Collect immediately: the mirror then reflects the frame just sent
+     * rather than the one before it. Costs the slave's compute inline. */
+    if (frame_in_flight) {
+        ok = link_master_frame_collect(link_ym_samples_buf, link_sn_samples_buf,
+                                       (uint32_t *)&link_ym_sample_count,
+                                       (uint32_t *)&link_sn_sample_count,
+                                       zram_merge);
+        frame_in_flight = false;
+        if (ok) { __dmb(); mirror_gen = inflight_frame_no; }
+    }
+#endif
 
     {
         uint32_t dt = (uint32_t)(time_us_64() - t_start);

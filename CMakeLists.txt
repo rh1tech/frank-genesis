@@ -55,6 +55,8 @@ set(CRT_DIM_PERCENT "60" CACHE STRING "CRT dim line brightness: 0-100")
 # Development aid: boot the last-opened ROM without a keypress. Off by
 # default; only for iterating on behaviour that must be seen at runtime.
 set(AUTOBOOT_LAST_ROM "0" CACHE STRING "Boot last ROM automatically: 0=off, 1=on")
+option(SOUND_CAPTURE "Hash generated PCM per frame for differential debugging" OFF)
+set(AUTOBOOT_PATH "" CACHE STRING "Development aid: boot this exact ROM path")
 
 # Logging (debug output via UART) - disable for release builds
 set(ENABLE_LOGGING "1" CACHE STRING "Enable debug logging: 0=off, 1=on")
@@ -307,6 +309,29 @@ target_link_libraries(frank-genesis
 
 if(BOARD_VARIANT STREQUAL "C2" AND NOT C2_LOCAL_SOUND)
     target_link_libraries(frank-genesis link)
+endif()
+
+# Plain if(), not a generator expression: ROM paths contain parentheses
+# ("ALADDIN (USA).MD") and those are syntax inside $<>, so the define
+# silently never appeared.
+# 0 = core 1 collects the slave's reply inline, right after sending.
+#
+# Must stay 0: a 68K read of Z80 RAM synchronises with the slave from
+# core 0 (LINK_OP_SYNC), which is only safe while core 1 is not using the
+# link. Deferring the collect to the next frame leaves core 1 holding the
+# link when core 0 needs it, and core 1 cannot make progress until core 0
+# ends the frame — so the read times out instead of getting a fresh byte.
+# Collecting inline costs nothing measurable: the frame rate is pinned by
+# audio pacing either way (59.8 fps against 60.5 with sound run locally).
+set(LINK_PIPELINE "0" CACHE STRING "Collect the slave's reply inline (0). 1 is incompatible with mid-frame sync.")
+target_compile_definitions(frank-genesis PRIVATE LINK_PIPELINE=${LINK_PIPELINE})
+
+if(SOUND_CAPTURE)
+    target_compile_definitions(frank-genesis PRIVATE SOUND_CAPTURE=1)
+endif()
+
+if(AUTOBOOT_PATH)
+    target_compile_definitions(frank-genesis PRIVATE AUTOBOOT_PATH="${AUTOBOOT_PATH}")
 endif()
 
 # USB configuration: stdio vs HID Host (mutually exclusive)

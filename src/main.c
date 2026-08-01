@@ -332,7 +332,96 @@ volatile int16_t last_frame_sample = 0;  // Last sample for crossfade
 int16_t *audio_read_sn76489 = NULL;
 int16_t *audio_read_ym2612 = NULL;
 
+#ifdef SOUND_CAPTURE
+/* Differential PCM capture. The analog capture path is dead, so instead of
+ * listening we hash the samples the emulator actually hands to the I2S
+ * stage. Running the local-sound build and the offloaded build from the
+ * same reset with the same ROM must produce the same stream; the first
+ * frame whose hash differs is the frame the offload diverges, which is a
+ * far sharper signal than "the sound goes wrong after a while". */
+#define SND_CAP_FRAMES     512
+#define SND_CAP_PCM_START  300
+#define SND_CAP_PCM_FRAMES 2
+#define SND_CAP_PCM_LEN    888
+uint32_t snd_cap_magic = 0x50434150u;   /* 'PACP' - anchors the dump */
+uint32_t snd_cap_count = 0;
+uint32_t snd_cap_crc[SND_CAP_FRAMES];
+/* Per-frame Z80 state signature for the SAME frame as the hash above.
+ * The offloaded build fills this from the slave's frame reply, the
+ * local-sound build from its own Z80. If the PCM diverges while this
+ * still matches, the fault is in the chips; if this diverges first,
+ * the fault is in the Z80 or the event replay feeding it. */
+uint32_t snd_cap_z80[SND_CAP_FRAMES];
+
+/* Long-run verification. The per-frame arrays only cover the first ~8 s;
+ * a running hash over every frame, sampled at fixed frame counts, checks
+ * bit-identity for as long as the board runs without needing the RAM to
+ * store it. */
+uint32_t snd_cap_run;                    /* FNV over every frame's hash */
+uint32_t snd_cap_ckpt[8];
+static const uint32_t snd_cap_ckpt_at[8] =
+    { 256, 512, 1024, 1536, 2048, 3072, 4096, 6144 };
+volatile uint32_t snd_cap_z80_src;
+/* Register-level window around the first divergence. PC/SP/AF/BC/DE/HL/
+ * IX/IY/BANK/zclk for a span of frames, so the diff says which piece of
+ * Z80 state went wrong rather than just that the hash changed. */
+#define SND_CAP_REG_START  80
+#define SND_CAP_REG_FRAMES 64
+uint32_t snd_cap_regs[SND_CAP_REG_FRAMES][6];
+volatile uint32_t snd_cap_reg_src[6];
+
+/* Intra-frame trace. Frame-granular signatures say the two Z80s part
+ * company on frame SND_TRACE_FRAME but not where inside it; this
+ * records (PC, zclk) at every scanline boundary of that one frame, on
+ * both halves, so the first differing scanline localises it. */
+volatile uint32_t snd_trace_frame = 0xFFFFFFFFu;  /* poke over SWD to arm */
+
+#define SEAM_FRAMES 512
+uint32_t seam_frame;
+uint16_t seam_ctrl_reads[SEAM_FRAMES];
+uint16_t seam_zram_reads[SEAM_FRAMES];
+uint32_t snd_trace_pc[128][2];
+uint32_t snd_trace_n;
+#ifdef C2_LOCAL_SOUND
+/* How fresh must the master's Z80-RAM mirror be?
+ *
+ * The offloaded build cannot give the 68K this frame's Z80 writes at
+ * all: the slave only replays frame N after the master has finished it.
+ * So the question is how many frames of staleness the game tolerates.
+ * snap1 models a mirror holding Z80 RAM as of the end of the previous
+ * frame, snap2 the frame before that. The first read each of them would
+ * have answered wrongly says which designs are viable. */
+unsigned char zram_snap1[8192], zram_snap2[8192];
+uint32_t stale1_first = 0xFFFFFFFFu, stale2_first = 0xFFFFFFFFu;
+uint32_t stale1_hits, stale2_hits, stale_reads;
+
+void snd_trace_run(void) {
+    extern uint32_t master_sig_count;
+    extern void z80_state_regs(uint32_t out[6]);
+    if (master_sig_count != snd_trace_frame || snd_trace_n >= 128) return;
+    uint32_t rr[6];
+    z80_state_regs(rr);
+    snd_trace_pc[snd_trace_n][0] = rr[0] & 0xFFFFu;   /* PC */
+    snd_trace_pc[snd_trace_n][1] = rr[5];             /* zclk */
+    snd_trace_n++;
+}
+unsigned char zram_stale_snap[8192];
+uint32_t zram_stale_reads, zram_stale_diffs, zram_stale_first_frame = 0xFFFFFFFFu;
+#endif
+int16_t  snd_cap_pcm[SND_CAP_PCM_FRAMES * SND_CAP_PCM_LEN];
+uint32_t snd_cap_counts[SND_CAP_PCM_FRAMES][2];
+#endif
+
 // ROM buffer in PSRAM
+#ifdef C2_LOCAL_SOUND
+/* Reference trace for the differential test against the slave. */
+#define MASTER_SIG_SLOTS 1024
+#define MASTER_DBG_FRAMES 48
+uint32_t master_dbg[MASTER_DBG_FRAMES][6];
+uint32_t master_sig[MASTER_SIG_SLOTS];
+uint32_t master_sig_count;
+#endif
+
 static uint8_t *rom_buffer = NULL;
 static uint32_t rom_size_bytes = 0;
 // Remove duplicate MAX_ROM_SIZE - it's defined in gwenesis_bus.h
@@ -616,6 +705,43 @@ static void __scratch_x("sound") sound_core(void) {
             saved_sn_samples = 0;
         }
         __dmb();
+#endif
+
+#ifdef SOUND_CAPTURE
+        {
+            /* FNV-1a over both chip buffers plus their sample counts. */
+            uint32_t h = 2166136261u;
+            const int16_t *cy = audio_read_ym2612;
+            const int16_t *cs = audio_read_sn76489;
+            if (cy) for (int i = 0; i < saved_ym_samples; i++) { h ^= (uint16_t)cy[i]; h *= 16777619u; }
+            if (cs) for (int i = 0; i < saved_sn_samples; i++) { h ^= (uint16_t)cs[i]; h *= 16777619u; }
+            h ^= (uint32_t)saved_ym_samples * 65599u + (uint32_t)saved_sn_samples;
+            snd_cap_run ^= h;
+            snd_cap_run *= 16777619u;
+            for (int c = 0; c < 8; c++)
+                if (snd_cap_count == snd_cap_ckpt_at[c]) snd_cap_ckpt[c] = snd_cap_run;
+
+            if (snd_cap_count < SND_CAP_FRAMES) {
+                snd_cap_crc[snd_cap_count] = h;
+                snd_cap_z80[snd_cap_count] = snd_cap_z80_src;
+            }
+            if (snd_cap_count >= SND_CAP_REG_START &&
+                snd_cap_count <  SND_CAP_REG_START + SND_CAP_REG_FRAMES) {
+                uint32_t rs = snd_cap_count - SND_CAP_REG_START;
+                for (int i = 0; i < 6; i++)
+                    snd_cap_regs[rs][i] = snd_cap_reg_src[i];
+            }
+            if (snd_cap_count >= SND_CAP_PCM_START &&
+                snd_cap_count <  SND_CAP_PCM_START + SND_CAP_PCM_FRAMES) {
+                uint32_t sl = snd_cap_count - SND_CAP_PCM_START;
+                int16_t *dst = &snd_cap_pcm[sl * SND_CAP_PCM_LEN];
+                for (int i = 0; i < SND_CAP_PCM_LEN; i++)
+                    dst[i] = (cy && i < saved_ym_samples) ? cy[i] : 0;
+                snd_cap_counts[sl][0] = (uint32_t)saved_ym_samples;
+                snd_cap_counts[sl][1] = (uint32_t)saved_sn_samples;
+            }
+            snd_cap_count++;
+        }
 #endif
 
         // This blocks until previous frame's DMA is done
@@ -943,6 +1069,41 @@ static void __time_critical_func(emulation_loop)(void) {
         #define AUDIO_TARGET_CLOCK (TARGET_SAMPLES_PER_FRAME * AUDIO_FREQ_DIVISOR)
         PROFILE_START();
         sound_frame_end(AUDIO_TARGET_CLOCK);
+
+#ifdef C2_LOCAL_SOUND
+        {
+            extern uint32_t z80_state_signature(void);
+            /* Ring, not a prefix: the fault appears tens of seconds in,
+             * long after a fixed-size trace from boot has filled up. This
+             * always holds the most recent MASTER_SIG_SLOTS frames, and
+             * master_sig_count gives the absolute frame number so the two
+             * runs can be aligned. */
+            if (master_sig_count < MASTER_SIG_SLOTS) {
+                extern void z80_state_regs(uint32_t out[6]);
+                if (master_sig_count < MASTER_DBG_FRAMES)
+                    z80_state_regs(master_dbg[master_sig_count]);
+                master_sig[master_sig_count] = z80_state_signature();
+#ifdef SOUND_CAPTURE
+                snd_cap_z80_src = master_sig[master_sig_count];
+                {
+                    uint32_t rr[6];
+                    z80_state_regs(rr);
+                    for (int i = 0; i < 6; i++) snd_cap_reg_src[i] = rr[i];
+                }
+                {   /* age the modelled mirrors by one frame */
+                    extern unsigned char ZRAM[];
+                    memcpy(zram_snap2, zram_snap1, sizeof(zram_snap2));
+                    memcpy(zram_snap1, ZRAM, sizeof(zram_snap1));
+                    memcpy(zram_stale_snap, ZRAM, sizeof(zram_stale_snap));
+                }
+#endif
+            }
+            master_sig_count++;
+        }
+#endif
+#ifdef SOUND_CAPTURE
+        seam_frame++;
+#endif
         PROFILE_END(sound_time);
         
         // ==================================================================
@@ -1336,7 +1497,38 @@ int main(void) {
      * browser last opened, so a flash-and-test cycle needs no keypress.
      * Only useful when iterating on something that has to be observed
      * while a game runs. */
-    if (g_settings.browser_file[0]) {
+    /* Validate before trusting it. Saved settings can be corrupt — a
+     * garbage browser_file built a garbage path here and left the
+     * firmware stuck inside printf with a nonsense length, which looks
+     * like a hang with no obvious cause. Fall back to the browser
+     * instead of acting on rubbish. */
+    bool autoboot_ok = false;
+    {
+        size_t n = 0;
+        while (n < sizeof(g_settings.browser_file) && g_settings.browser_file[n]) n++;
+        if (n > 0 && n < sizeof(g_settings.browser_file)) {
+            autoboot_ok = true;
+            for (size_t i = 0; i < n; i++) {
+                unsigned char c = (unsigned char)g_settings.browser_file[i];
+                if (c < 0x20 || c > 0x7E) { autoboot_ok = false; break; }
+            }
+        }
+        /* The path must be a sane C string too. */
+        size_t p = 0;
+        while (p < sizeof(g_settings.browser_path) && g_settings.browser_path[p]) p++;
+        if (p >= sizeof(g_settings.browser_path)) autoboot_ok = false;
+    }
+
+#ifdef AUTOBOOT_PATH
+    /* An explicit path wins over the saved browser position: saved
+     * settings can be corrupt, and a development aid that depends on
+     * them is useless exactly when the board is in a bad state. */
+    if (1) {
+        snprintf(selected_rom, sizeof(selected_rom), "%s", AUTOBOOT_PATH);
+        LOG("Autoboot (fixed): %s\n", selected_rom);
+    } else
+#endif
+    if (autoboot_ok) {
         snprintf(selected_rom, sizeof(selected_rom), "%s%s%s",
                  g_settings.browser_path,
                  g_settings.browser_path[0] &&

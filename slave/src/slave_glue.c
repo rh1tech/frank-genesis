@@ -63,22 +63,48 @@ void slave_rom_set(unsigned char *base, uint32_t bytes) {
  * merely quiet. */
 uint32_t slave_foreign_reads  = 0;
 uint32_t slave_foreign_writes = 0;
+uint32_t slave_foreign_last   = 0;
+uint32_t slave_foreign_min    = 0xFFFFFFFFu;
+uint32_t slave_foreign_max    = 0;
 
 /* The Z80 reaching into 68K address space through its bank register.
  *
- * ROM is served from PSRAM. Anything else — chiefly 68K work RAM at
- * 0xE00000 — lives on the master and is not reachable from here. Open
- * bus (0xFF) is what an unmapped Genesis read yields, so returning it
- * is at least the same shape of wrong, and the counter makes it
- * visible. Sound drivers overwhelmingly use Z80 RAM plus ROM, which is
- * why this is a counter and not a link round trip. */
+ * This must match gwenesis_bus_read_memory_8() on the master, not real
+ * hardware. That distinction cost a long hunt: unmapped reads return
+ * 0xFF on a real Genesis, which is what this used to answer, but the
+ * emulator's bus returns 0x00 (its switch default). Aladdin's driver
+ * banks out of range and reads there, so it saw 0xFF where the master
+ * would have given it 0x00, branched differently, left a nonsense value
+ * in the bank register, and produced garbage from then on — audible as
+ * sound that degrades during gameplay and only recovers when the title
+ * screen reinitialises the driver.
+ *
+ * The counters stay, because a game that reads outside the ROM is worth
+ * knowing about even when the value returned is now correct. */
 unsigned int m68k_read_memory_8(unsigned int address) {
-    if (ROM_DATA && address < rom_bytes) {
-        /* ROM is stored big-endian, as on the master. */
-        return ROM_DATA[address ^ 1];
+    unsigned int range = address >> 16;
+
+    /* Everything below 0x800000 is ROM as far as the master's bus is
+     * concerned, whatever the cartridge size. */
+    if (range < 0x80) {
+        if (ROM_DATA && address < rom_bytes) {
+            return ROM_DATA[address ^ 1];   /* stored big-endian, as on the master */
+        }
+        /* Past the end of this cartridge. The master reads whatever its
+         * ROM buffer happens to hold there; zero is the closest we can
+         * be, and it is what the unmapped default gives. */
+        slave_foreign_reads++;
+        slave_foreign_last = address;
+        if (address < slave_foreign_min) slave_foreign_min = address;
+        if (address > slave_foreign_max) slave_foreign_max = address;
+        return 0x00;
     }
+
     slave_foreign_reads++;
-    return 0xFF;
+    slave_foreign_last = address;
+    if (address < slave_foreign_min) slave_foreign_min = address;
+    if (address > slave_foreign_max) slave_foreign_max = address;
+    return 0x00;    /* gwenesis_bus_read_memory_8()'s default */
 }
 
 void m68k_write_memory_8(unsigned int address, unsigned int value) {

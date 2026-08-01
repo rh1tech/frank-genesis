@@ -676,7 +676,11 @@ static inline __attribute__((always_inline)) void gwenesis_bus_write_memory_16(u
 
   case Z80_RAM_ADDR:
   case Z80_RAM_ADDR1K:
-    ZRAM[address & 0X1FFF]= value >> 8;
+    /* Must go through the seam like the 8-bit path at write_memory_8:
+     * on C2 the Z80's RAM lives on the slave, and a direct store here
+     * updates only the master's unused copy, so the byte never reaches
+     * the Z80 that actually runs. Expands to the same store on M1/M2. */
+    sound_zram_write(address & 0X1FFF, value >> 8);
     return;
 
   case IO_CTRL:

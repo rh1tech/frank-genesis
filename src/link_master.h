@@ -53,13 +53,24 @@ bool link_master_send_config(const link_sound_config_t *cfg);
  * to diagnose here than as inexplicably wrong music later. */
 bool link_master_upload_rom(const uint8_t *rom, uint32_t bytes);
 
-/* One frame's exchange: ship `count` events, collect the slave's audio
- * and its Z80 RAM snapshot. `zram_merge` is called with the 8 KB
- * snapshot so the caller can merge it under its own recent writes. */
-bool link_master_frame(const link_event_t *events, uint32_t count,
-                       bool zram_dirty, int audio_target, uint32_t seq,
-                       int16_t *ym_out, int16_t *sn_out,
-                       uint32_t *ym_count, uint32_t *sn_count,
-                       void (*zram_merge)(const uint8_t *snapshot));
+/* One frame's exchange, split so the slave's compute overlaps the
+ * master's emulation instead of blocking core 1 on it.
+ *
+ * _send ships `count` events and returns as soon as they are on the
+ * wire. _collect takes the reply for the frame most recently sent:
+ * audio, and the Z80 RAM snapshot handed to `zram_merge` so the caller
+ * can merge it under its own newer writes. Call _collect for frame N at
+ * the top of frame N+1, by which time the slave is already waiting to
+ * hand it over. */
+/* Mid-frame synchronisation: replay `count` events on the slave now and
+ * return Z80 RAM byte `offset` as of that point. */
+bool link_master_sync_peek(const link_event_t *events, uint32_t count,
+                           uint16_t offset, uint8_t *out);
+
+bool link_master_frame_send(const link_event_t *events, uint32_t count,
+                            bool zram_dirty, int audio_target, uint32_t seq);
+bool link_master_frame_collect(int16_t *ym_out, int16_t *sn_out,
+                               uint32_t *ym_count, uint32_t *sn_count,
+                               void (*zram_merge)(const uint8_t *snapshot));
 
 #endif /* LINK_MASTER_H */
