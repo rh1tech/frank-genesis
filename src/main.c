@@ -1358,6 +1358,7 @@ int main(void) {
     for (int attempt = 0; attempt < 5 && !link_master_connected(); attempt++) {
         link_master_probe(200000, NULL);
     }
+    LOG("Link: probe -> %s\n", link_master_connected() ? "connected" : "no answer");
 
     if (link_master_connected()) {
         LOG("Link: uploading %lu KB ROM to slave...\n",

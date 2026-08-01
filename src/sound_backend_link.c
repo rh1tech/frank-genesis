@@ -81,9 +81,21 @@ static inline void emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
 
 static uint8_t  zram_mirror[LINK_ZRAM_BYTES];
 static uint32_t zram_dirty[LINK_ZRAM_BYTES / 32];   /* since last merge  */
-uint32_t        zram_frame_dirty[LINK_ZRAM_BYTES / 32]; /* this frame    */
+
+/* Per-frame dirty bitmap, double-buffered exactly like the event ring.
+ *
+ * A single bitmap races: core 0 keeps writing Z80 RAM while core 1 is
+ * sending, and clearing the map afterwards discards any bit set during
+ * the send. Those bytes are already in the mirror, so they are never
+ * marked again and never travel — silently dropped. That matters most
+ * during a driver upload, where losing a handful of bytes out of 8 KB
+ * leaves the slave running corrupt Z80 code that does nothing audible. */
+static uint32_t zram_dirty_buf[2][LINK_ZRAM_BYTES / 32];
+static volatile int zram_dirty_write;
+uint32_t       *zram_frame_dirty;          /* the buffer being sent */
 uint8_t        *zram_frame_data = zram_mirror;
-volatile bool   zram_frame_any;
+static volatile bool zram_any[2];
+uint32_t        zram_dirty_bytes;          /* cumulative, for diagnosis */
 
 /* 68K writes to Z80 RAM are NOT streamed as events.
  *
@@ -104,10 +116,13 @@ volatile bool   zram_frame_any;
 void sound_zram_write(unsigned int offset, unsigned int value) {
     offset &= (LINK_ZRAM_BYTES - 1);
 
+    int w = zram_dirty_write;
+
     zram_mirror[offset] = (uint8_t)value;
-    zram_dirty[offset >> 5]       |= 1u << (offset & 31);
-    zram_frame_dirty[offset >> 5] |= 1u << (offset & 31);
-    zram_frame_any = true;
+    zram_dirty[offset >> 5]          |= 1u << (offset & 31);
+    zram_dirty_buf[w][offset >> 5]   |= 1u << (offset & 31);
+    zram_any[w] = true;
+    zram_dirty_bytes++;
 }
 
 unsigned int sound_zram_read(unsigned int offset) {
@@ -281,10 +296,18 @@ static int z80_bus_ack;
 static int z80_reset_held;
 
 void sound_z80_ctrl_write(unsigned int address, unsigned int value) {
-    if ((address & 0x1F00) == 0x1100) {
+    /* Exact addresses, exactly as z80inst.c's z80_write_ctrl() decodes
+     * them. This was `(address & 0x1F00) == 0x1200`, which looks
+     * harmlessly more permissive and is not: a byte write anywhere in
+     * 0xA112xx — odd-address halves of a word write, for instance —
+     * became a reset pulse the real decoder ignores. The Z80 was reset
+     * several times a frame, so it sat at PC=0 forever while every other
+     * indicator (reset released, bus granted, zclk advancing a full
+     * frame) said it was running normally. */
+    if (address == 0x1100) {
         z80_bus_ack = value ? 1 : 0;
         emit(LINK_EV_BUSREQ, 0, (uint8_t)(value ? 1 : 0), 0);
-    } else if ((address & 0x1F00) == 0x1200) {
+    } else if (address == 0x1200) {
         z80_reset_held = value ? 0 : 1;
         emit(LINK_EV_RESET_LINE, 0, (uint8_t)(value ? 1 : 0), 0);
     }
@@ -373,13 +396,22 @@ void sound_frame_end(int audio_target_clock) {
      * main.c already applies when core 1 is behind. */
     while (pending_buffer >= 0) tight_loop_contents();
 
-    pending_target = (uint32_t)audio_target_clock;
-    pending_zram   = zram_frame_any;
-    pending_buffer = event_write;
+    int zw = zram_dirty_write;
+
+    pending_target   = (uint32_t)audio_target_clock;
+    pending_zram     = zram_any[zw];
+    zram_frame_dirty = zram_dirty_buf[zw];
+    pending_buffer   = event_write;
     __dmb();
 
+    /* Flip both rings together so core 0 never writes into what core 1
+     * is about to transmit. */
     event_write = 1 - event_write;
     event_count[event_write] = 0;
+
+    zram_dirty_write = 1 - zw;
+    memset(zram_dirty_buf[1 - zw], 0, sizeof(zram_dirty_buf[0]));
+    zram_any[1 - zw] = false;
 }
 
 /* Called from core 1. Ships the pending frame and collects the slave's
@@ -400,10 +432,28 @@ bool sound_link_exchange(void) {
      * Until then the exchange keeps failing and audio stays silent,
      * which is the honest outcome rather than replaying stale samples. */
     if (!link_master_connected()) {
-        static uint32_t retry_countdown;
-        if (retry_countdown == 0) {
-            retry_countdown = 60;               /* ~1 s at 60 fps */
-            if (link_master_probe(2000, NULL) && rom_ptr && rom_len) {
+        /* This runs on core 1, and core 0 spins on audio_done waiting for
+         * it (main.c:1026). Anything slow here freezes the emulator, so
+         * the recovery path must stay cheap: a 2 ms probe, and the
+         * expensive 2 MB re-upload only after one actually succeeds,
+         * with a wall-clock cooldown so a slave that is answering but
+         * failing cannot stall the game several seconds out of every
+         * few. Time-based, not frame-based: frames stop advancing while
+         * core 0 is blocked, which would defeat a frame counter. */
+        static uint64_t retry_after_us;
+        uint64_t now = time_us_64();
+
+        if (now >= retry_after_us) {
+            retry_after_us = now + 1000000;      /* 1 s between probes */
+            /* 50 ms, not 2 ms. The slave may be partway through a
+             * doorbell wait left over from an exchange the master
+             * abandoned, and will not return to its serve loop for tens
+             * of milliseconds. Probing faster than that can never
+             * resynchronise the pair — the master gives up before the
+             * slave is listening again. Bounded by the 1 s cooldown, so
+             * a genuinely absent slave costs 5% of core 1, not a stall. */
+            if (link_master_probe(50000, NULL) && rom_ptr && rom_len) {
+                retry_after_us = now + 5000000;  /* 5 s if re-priming */
                 /* A slave that just rejoined has no ROM and no chip
                  * state, so it cannot simply resume mid-stream. Prime it
                  * exactly as a fresh ROM load would. */
@@ -411,15 +461,15 @@ bool sound_link_exchange(void) {
                     (unsigned long)(rom_len >> 10));
                 if (link_master_upload_rom(rom_ptr, rom_len) &&
                     link_master_send_config(&rom_cfg)) {
+                    retry_after_us = 0;
                     ym_shadow_reset();
                     memset(zram_dirty, 0, sizeof(zram_dirty));
-                    memset(zram_frame_dirty, 0xFF, sizeof(zram_frame_dirty));
-                    zram_frame_any = true;   /* resend all of Z80 RAM */
+                    memset(zram_dirty_buf[zram_dirty_write], 0xFF,
+                           sizeof(zram_dirty_buf[0]));
+                    zram_any[zram_dirty_write] = true;  /* resend all of Z80 RAM */
                     LOG("Link: slave re-primed\n");
                 }
             }
-        } else {
-            retry_countdown--;
         }
 
         pending_buffer = -1;
@@ -436,10 +486,6 @@ bool sound_link_exchange(void) {
                                 zram_merge);
 
     __dmb();
-    if (pending_zram) {
-        memset(zram_frame_dirty, 0, sizeof(zram_frame_dirty));
-        zram_frame_any = false;
-    }
     pending_buffer = -1;
 
     if (!ok) {
@@ -454,8 +500,11 @@ void sound_link_backend_reset(void) {
 
     memset(zram_mirror, 0, sizeof(zram_mirror));
     memset(zram_dirty, 0, sizeof(zram_dirty));
-    memset(zram_frame_dirty, 0, sizeof(zram_frame_dirty));
-    zram_frame_any = false;
+    memset(zram_dirty_buf, 0, sizeof(zram_dirty_buf));
+    zram_any[0] = zram_any[1] = false;
+    zram_dirty_write = 0;
+    zram_frame_dirty = zram_dirty_buf[0];
+    zram_dirty_bytes = 0;
 
     event_count[0] = event_count[1] = 0;
     event_write    = 0;

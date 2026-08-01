@@ -37,6 +37,17 @@ static bool           initialized;
 static bool           connected;
 static uint32_t       last_foreign_reads;
 
+/* Where the last frame exchange failed, so a link that drops says which
+ * step broke instead of just going quiet. */
+uint32_t link_fail_stage;
+
+/* ROM upload progress, so a failed upload names the step it died on.
+ * 0 = never attempted, 1 = BEGIN sent, 2 = BEGIN acked, 3 = in chunks,
+ * 4 = END sent, 5 = END acked, 9 = complete and CRC matched. */
+uint32_t link_upload_stage;
+uint32_t link_upload_chunk;
+uint32_t link_probe_ok, link_probe_fail;
+
 /* The slave does not merely acknowledge a frame — it replays the whole
  * event stream, runs the Z80 and renders the FM and PSG, which is
  * precisely the work we moved off the master. That takes on the order of
@@ -107,6 +118,7 @@ bool link_master_probe(uint32_t timeout_us, link_node_info_t *info) {
 
     session.handshake_timeout_us = 0;
     connected = ok;
+    if (ok) link_probe_ok++; else link_probe_fail++;
     return ok;
 }
 
@@ -158,9 +170,12 @@ bool link_master_upload_rom(const uint8_t *rom, uint32_t bytes) {
      * copy each chunk into PSRAM, which is the slow half of this. */
     session.handshake_timeout_us = LINK_HANDSHAKE_TIMEOUT_US;
 
+    link_upload_stage = 1;
+    link_upload_chunk = 0;
     bool ok = link_m_send_ctrl(&session, LINK_OP_ROM_BEGIN, bytes, 0, NULL, 0) &&
               link_m_recv_ctrl(&session) &&
               link_rx_hdr(&session)->op == LINK_OP_ROM_BEGIN_ACK;
+    if (ok) link_upload_stage = 2;
 
     if (ok && link_rx_hdr(&session)->arg0 < bytes) {
         LOG("Link: ROM %lu KB exceeds slave PSRAM %lu KB\n",
@@ -176,6 +191,8 @@ bool link_master_upload_rom(const uint8_t *rom, uint32_t bytes) {
         /* Bulk lengths must be whole words. */
         uint32_t wire_len = LINK_ALIGN4(len);
 
+        link_upload_stage = 3;
+        link_upload_chunk = off / LINK_ROM_CHUNK_BYTES;
         ok = link_m_send_ctrl(&session, LINK_OP_ROM_CHUNK, off, len, NULL, 0) &&
              link_m_bulk_send(&session, rom + off, wire_len) &&
              link_m_recv_ctrl(&session) &&
@@ -186,9 +203,11 @@ bool link_master_upload_rom(const uint8_t *rom, uint32_t bytes) {
     if (ok) {
         uint32_t our_crc = link_crc32(rom, bytes);
 
+        link_upload_stage = 4;
         ok = link_m_send_ctrl(&session, LINK_OP_ROM_END, our_crc, 0, NULL, 0) &&
              link_m_recv_ctrl(&session) &&
              link_rx_hdr(&session)->op == LINK_OP_ROM_END_ACK;
+        if (ok) link_upload_stage = 5;
 
         if (ok && link_rx_hdr(&session)->arg0 != our_crc) {
             LOG("Link: ROM CRC mismatch — ours %08lx, slave %08lx\n",
@@ -199,6 +218,7 @@ bool link_master_upload_rom(const uint8_t *rom, uint32_t bytes) {
     }
 
     session.handshake_timeout_us = 0;
+    if (ok) link_upload_stage = 9;
     if (!ok) connected = false;
     return ok;
 }
@@ -214,26 +234,31 @@ bool link_master_frame(const link_event_t *events, uint32_t count,
      * cost one frame of audio, not stall the emulator. */
     session.handshake_timeout_us = LINK_FRAME_TIMEOUT_US;
 
+    link_fail_stage = 1;
     bool ok = link_m_send_ctrl(&session, LINK_OP_FRAME, count,
                                (uint32_t)audio_target, NULL, 0);
     /* Always follow with ZRAM_BLOCK so the slave's step sequence is the
      * same whether or not anything changed. */
     if (ok) {
+        link_fail_stage = 2;
         ok = link_m_send_ctrl(&session, LINK_OP_ZRAM_BLOCK,
                               zram_dirty ? 1 : 0, 0, NULL, 0);
     }
     if (ok && zram_dirty) {
-        extern uint32_t zram_frame_dirty[];
+        extern uint32_t *zram_frame_dirty;
         extern uint8_t *zram_frame_data;
+        link_fail_stage = 3;
         ok = link_m_bulk_send(&session, zram_frame_dirty, LINK_ZRAM_BYTES / 8) &&
              link_m_bulk_send(&session, zram_frame_data, LINK_ZRAM_BYTES);
     }
 
     if (ok && count) {
+        link_fail_stage = 4;
         ok = link_m_bulk_send(&session, events, count * sizeof(link_event_t));
     }
 
     if (ok) {
+        link_fail_stage = 5;
         ok = link_m_recv_ctrl(&session) &&
              link_rx_hdr(&session)->op == LINK_OP_FRAME_ACK;
     }
@@ -263,6 +288,7 @@ bool link_master_frame(const link_event_t *events, uint32_t count,
         if (ok) {
             if (ym_count) *ym_count = ym;
             if (sn_count) *sn_count = sn;
+            link_fail_stage = 0;
         }
 
         /* Surface anything the slave could not do rather than letting it
