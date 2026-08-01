@@ -175,6 +175,68 @@ prints them every 300 frames. Take a baseline on a real ROM before the
 split so the result is a measurement rather than an assumption — what
 moves to the slave is exactly `z80_time + sound_time`.
 
+## Verified on hardware
+
+Aladdin (2 MB), both halves at 504 MHz:
+
+| Measure | Result |
+|---|---|
+| Frame exchanges | 1243 in 30 s, **zero** failures |
+| Event overflows | 0 |
+| Probe failures | 0 |
+| ROM upload | 64/64 chunks, CRC matched |
+| Audio | 71.7% of energy in the 150-600 Hz melody band, 63% of full scale |
+| Master profile | m68k 6.17 s, vdp 0.25 s, **z80 0.025 s, sound 0.021 s** |
+
+Z80 plus sound is 0.7% of tracked emulation time on the master — event
+emission and frame bookkeeping only. The chips themselves run entirely
+on the slave.
+
+## Bugs this cost, and what they looked like
+
+Every one of these produced silence or a hang, and almost none pointed
+at its own cause. Recorded because the same traps are waiting in any
+similar split.
+
+1. **Clock mismatch** (504 vs 252 MHz). Only the transmitter is divided,
+   so bulk arrived at twice the rate the slave could sample. Control
+   frames survived — they use a slower divider — so it read as a
+   protocol bug rather than a wire-rate one.
+2. **Missing `set_flash_timings()`** on the slave. Fixing (1) by raising
+   its clock then ran the QSPI out of spec and it faulted before `main()`.
+3. **Z80 RAM streamed as events.** A driver upload is 8 KB of byte
+   writes in one frame against a 4096-event ring; it truncated and the
+   slave ran a corrupt driver.
+4. **`AUDIO_FREQ_DIVISOR` shadowed** by a local `#ifndef ... #define 60`
+   fallback where the real value is 1009. Compiled cleanly, and nothing
+   about the symptom pointed at a `#define`.
+5. **`zclk` not reset per frame.** The Z80 ran exactly one frame; the FM
+   then emitted constant DC, which reads as a mixing fault.
+6. **Over-permissive control decode.** `(address & 0x1F00) == 0x1200`
+   where the original compares exactly, turning stray writes in 0xA112xx
+   into reset pulses. The Z80 sat at PC=0 while every other indicator
+   said it was running.
+7. **ZRAM dirty-bitmap race.** Clearing the map after sending discarded
+   bits set during the send, silently dropping bytes from the driver
+   upload.
+8. **`ym.clock` not reset per frame** — same as (5), in the master's
+   timer shadow. Froze the YM status flags, and the 68K polling them ran
+   off into unmapped memory.
+
+Two of these, (5) and (8), are the same mistake in the two places a
+cycle count is carried across frames. If a third such counter is ever
+added, reset it with the others in `main.c` at frame start.
+
+### A debugging trap worth knowing
+
+Halting an RP2350 with OpenOCD **clears CPACR**. The next `gpio_put`
+(CP0 on RP2350) or 64-bit timestamp (VFP) then takes a UsageFault with
+`CFSR = NOCP` and escalates to a HardFault. The symptom is a core that
+appears to have crashed on its own moments after you looked at it, which
+is thoroughly misleading. Both halves re-assert CPACR — the slave in its
+serve loop, the master once per frame — and any debugger script should
+restore it before resuming.
+
 ## Phases
 
 1. Port the link layer; master and slave handshake and exchange a ping.
