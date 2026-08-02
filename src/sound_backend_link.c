@@ -51,6 +51,35 @@ static uint32_t zram_ev_frame;
 static bool     zram_apply_marked;
 static link_event_t events[2][LINK_MAX_EVENTS];
 static uint32_t     event_count[2];
+/* How many of each buffer's events the slave already has.
+ *
+ * The slave has to execute a frame's worth of Z80 either way; what cost
+ * us was *when*. A 68K read of Z80 RAM made the slave catch up the whole
+ * frame so far in one go while core 0 waited — measured at 2.7 ms a
+ * sync, 19.4% of the frame. Core 1 is idle about half a frame, so it
+ * hands the slave what has accumulated as the frame runs and core 0
+ * never waits for it. A read then only has to replay the little that is
+ * left. */
+static volatile uint32_t event_sent[2];
+static uint32_t     pending_sent;
+uint32_t            link_pushes, link_push_us;
+
+/* Both cores drive the link now, so they must not interleave. */
+static volatile int link_busy;
+static inline void link_lock(void) {
+    while (__atomic_exchange_n(&link_busy, 1, __ATOMIC_ACQUIRE))
+        tight_loop_contents();
+}
+static inline void link_unlock(void) {
+    __atomic_store_n(&link_busy, 0, __ATOMIC_RELEASE);
+}
+
+/* A whole frame is only about 44 events, so this has to be small or it
+ * never fires: the point is to keep the slave close in *time*, and each
+ * RUN_UNTIL is what lets it advance. */
+#ifndef LINK_PUSH_THRESHOLD
+#define LINK_PUSH_THRESHOLD 1u
+#endif
 /* Mid-frame flush.
  *
  * With the slave able to replay a partial frame, the event ring no
@@ -84,6 +113,17 @@ static inline bool emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
             event_overflows++;
             return false;
         }
+        /* The ring did not shrink — the slave merely has the events now.
+         * Compact what it already holds so there is room to keep going. */
+        {
+            int w2 = event_write;
+            uint32_t sent2 = event_sent[w2];
+            if (sent2 == 0) { event_overflows++; return false; }
+            memmove(events[w2], &events[w2][sent2],
+                    (event_count[w2] - sent2) * sizeof(link_event_t));
+            event_count[w2] -= sent2;
+            event_sent[w2]   = 0;
+        }
         n = event_count[event_write];
     }
 
@@ -99,6 +139,7 @@ static inline bool emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
 /* Core 0 drives the link here, mid-frame. That is safe only while core 1
  * is not using it, which is exactly the window after it has finished the
  * previous frame's exchange — the same condition the mirror needed. */
+__attribute__((unused))
 static bool link_core1_idle(void) {
     if (core0_frame == 0) return true;
     uint32_t need = core0_frame - 1;
@@ -118,18 +159,43 @@ static bool link_core1_idle(void) {
     return true;
 }
 
+/* Core 1: give the slave whatever has piled up, so it keeps pace with
+ * the master's frame instead of catching up in one lump later. */
+void sound_link_push(void) {
+    if (!link_master_connected()) return;
+    {
+        int w = event_write;
+        if (event_count[w] - event_sent[w] < LINK_PUSH_THRESHOLD) return;
+    }
+
+    uint64_t t0 = time_us_64();
+    link_lock();
+    int      w = event_write;          /* re-read: core 0 may have flipped */
+    uint32_t n = event_count[w];
+    uint32_t sent = event_sent[w];
+    if (n > sent && link_master_connected() &&
+        link_master_sync_peek(&events[w][sent], n - sent, 0, NULL)) {
+        event_sent[w] = n;
+        link_pushes++;
+    }
+    link_unlock();
+    link_push_us += (uint32_t)(time_us_64() - t0);
+}
+
 static bool link_flush_chunk(uint16_t peek_off, uint8_t *out) {
     if (!link_master_connected()) return false;
-    if (!link_core1_idle())       return false;
-    if (!link_master_connected()) return false;
 
-    int      w  = event_write;
-    uint32_t n  = event_count[w];
     uint64_t t0 = time_us_64();
+    link_lock();
+    int      w    = event_write;
+    uint32_t n    = event_count[w];
+    uint32_t sent = event_sent[w];
+    bool ok = link_master_connected() &&
+              link_master_sync_peek(&events[w][sent], n - sent, peek_off, out);
+    if (ok) event_sent[w] = n;
+    link_unlock();
 
-    if (!link_master_sync_peek(events[w], n, peek_off, out)) return false;
-
-    event_count[w] = 0;          /* handed over; start filling again */
+    if (!ok) return false;
     link_syncs++;
     link_sync_us += (uint32_t)(time_us_64() - t0);
     return true;
@@ -656,6 +722,8 @@ void sound_frame_end(int audio_target_clock) {
     pending_frame_no = core0_frame++;
     pending_zram     = zram_any[zw];
     zram_frame_dirty = zram_dirty_buf[zw];
+    link_lock();                 /* keep a push from straddling the flip */
+    pending_sent     = event_sent[event_write];
     pending_buffer   = event_write;
     __dmb();
 
@@ -663,6 +731,8 @@ void sound_frame_end(int audio_target_clock) {
      * is about to transmit. */
     event_write = 1 - event_write;
     event_count[event_write] = 0;
+    event_sent[event_write]  = 0;
+    link_unlock();
 
     zram_dirty_write = 1 - zw;
     memset(zram_dirty_buf[1 - zw], 0, sizeof(zram_dirty_buf[0]));
@@ -737,6 +807,8 @@ bool sound_link_exchange(void) {
 
     uint64_t t_start = time_us_64();
 
+    link_lock();
+
     /* Collect the frame sent last time before shipping this one: the
      * slave has had a whole frame of master emulation to produce it, so
      * this normally returns immediately instead of blocking core 1 for
@@ -756,7 +828,8 @@ bool sound_link_exchange(void) {
     }
 
     if (link_master_connected() &&
-        link_master_frame_send(events[buf], event_count[buf],
+        link_master_frame_send(&events[buf][pending_sent],
+                               event_count[buf] - pending_sent,
                                pending_zram, (int)pending_target, ++frame_seq)) {
         frame_in_flight = true;
         inflight_frame_no = pending_frame_no;
@@ -774,6 +847,8 @@ bool sound_link_exchange(void) {
         if (ok) { __dmb(); mirror_gen = inflight_frame_no; }
     }
 #endif
+
+    link_unlock();
 
     {
         uint32_t dt = (uint32_t)(time_us_64() - t_start);

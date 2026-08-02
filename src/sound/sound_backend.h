@@ -49,6 +49,9 @@ void         sound_z80_irq(unsigned int level);
  * exchanges the event stream for the previous frame's samples. */
 void         sound_z80_run(int target);
 void         sound_frame_end(int audio_target_clock);
+/* Core 1: hand the slave whatever has accumulated this frame so it keeps
+ * pace, instead of catching up in one lump when core 0 needs an answer. */
+void         sound_link_push(void);
 
 #else /* M1, M2, or C2 with C2_LOCAL_SOUND: run the chips inline */
 
@@ -156,6 +159,8 @@ static inline void sound_z80_run(int target) {
     { extern void snd_trace_run(void); snd_trace_run(); }
 #endif
 }
+
+static inline void sound_link_push(void) { }
 
 static inline void sound_frame_end(int audio_target_clock) {
     gwenesis_SN76489_run(audio_target_clock);

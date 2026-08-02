@@ -689,6 +689,7 @@ static void __scratch_x("sound") sound_core(void) {
         // current frame's lines while that wait would otherwise be idle.
         while (!frame_ready) {
             vdp_render_worker_poll();
+            sound_link_push();      /* keep the slave abreast of core 0 */
             tight_loop_contents();
         }
         frame_ready = false;
@@ -839,7 +840,7 @@ static bool vdp_job_take(void) {
 volatile bool vdp_job_busy;
 
 void vdp_render_worker_poll(void) {
-    if (!vdp_job_take()) return;
+    if (!vdp_job_take()) { sound_link_push(); return; }
     gwenesis_vdp_render_line(vdp_job_line);
     __dmb();
     vdp_job_done = true;
