@@ -326,8 +326,15 @@ endif()
 set(LINK_PIPELINE "0" CACHE STRING "Collect the slave's reply inline (0). 1 is incompatible with mid-frame sync.")
 target_compile_definitions(frank-genesis PRIVATE LINK_PIPELINE=${LINK_PIPELINE})
 
+set(VDP_RASTER_RENDER "1" CACHE STRING "Draw each line as the beam reaches it (1) instead of the whole frame afterwards (0)")
+target_compile_definitions(frank-genesis PRIVATE VDP_RASTER_RENDER=${VDP_RASTER_RENDER})
+
 set(VDP_SPLIT_RENDER "1" CACHE STRING "Render frame lines across both cores (1) or core 0 only (0)")
 target_compile_definitions(frank-genesis PRIVATE VDP_SPLIT_RENDER=${VDP_SPLIT_RENDER})
+
+if(VDP_RASTER_PROFILE)
+    target_compile_definitions(frank-genesis PRIVATE VDP_RASTER_PROFILE=1)
+endif()
 
 if(SCREEN_VERIFY)
     target_compile_definitions(frank-genesis PRIVATE SCREEN_VERIFY=1)

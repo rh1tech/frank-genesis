@@ -70,6 +70,46 @@ unsigned char VRAM[VRAM_MAX_SIZE];
 unsigned short CRAM[CRAM_MAX_SIZE]; // CRAM - Palettes
 unsigned char SAT_CACHE[SAT_CACHE_MAX_SIZE]; // Sprite cache
 unsigned char gwenesis_vdp_regs[REG_SIZE]; // Registers
+uint32_t vdp_reg_writes_active, vdp_reg_writes_total;
+uint32_t vdp_vsram_writes_active, vdp_cram_writes_active, vdp_vram_writes_active;
+
+/* Shape of the mid-frame palette activity: which CRAM entries change,
+ * on how many distinct scanlines, and how many changes in one frame.
+ * That decides whether the effect can be reproduced by giving the
+ * display a handful of palette banks, or whether it needs a genuinely
+ * per-line palette. */
+uint32_t cram_addr_mask_lo, cram_addr_mask_hi;   /* which of the 64 entries */
+uint8_t  cram_line_hist[240];                    /* lines that saw a change */
+uint32_t cram_changes_this_frame, cram_changes_max;
+
+/* True while the beam is inside the visible field. Anything a game
+ * changes here is a raster effect, and the end-of-frame renderer cannot
+ * reproduce it: every line is drawn with whatever the value ended up as. */
+static inline int vdp_mid_frame(void) {
+    extern int scan_line, screen_height;
+    return scan_line > 0 && scan_line < screen_height;
+}
+
+#ifdef VDP_RASTER_PROFILE
+#define RASTER_NOTE_CRAM(a, newv) do {                                     \
+    if (vdp_mid_frame() && CRAM[a] != (newv)) {                            \
+        extern int scan_line;                                              \
+        vdp_cram_writes_active++;                                          \
+        if ((a) < 32) cram_addr_mask_lo |= 1u << (a);                      \
+        else if ((a) < 64) cram_addr_mask_hi |= 1u << ((a) - 32);          \
+        if (scan_line < 240 && cram_line_hist[scan_line] < 255)            \
+            cram_line_hist[scan_line]++;                                   \
+        cram_changes_this_frame++;                                         \
+    }                                                                      \
+} while (0)
+#define RASTER_NOTE_VRAM() do { if (vdp_mid_frame()) vdp_vram_writes_active++; } while (0)
+#define RASTER_NOTE_VSRAM() do { if (vdp_mid_frame()) vdp_vsram_writes_active++; } while (0)
+#else
+#define RASTER_NOTE_CRAM(a, newv) ((void)0)
+#define RASTER_NOTE_VRAM()        ((void)0)
+#define RASTER_NOTE_VSRAM()       ((void)0)
+#endif
+uint8_t  vdp_reg_active_mask[64];
 unsigned short fifo[FIFO_SIZE]; // Fifo
 //uint8_t CRAM222[CRAM_MAX_SIZE * 4];    // CRAM - Palettes
 unsigned short VSRAM[VSRAM_MAX_SIZE]; // VSRAM - Scrolling
@@ -272,6 +312,22 @@ static inline __attribute__((always_inline)) void gwenesis_vdp_register_w(int re
     if ((BIT(gwenesis_vdp_regs[0x1], 2) == 0) && reg > 0xA)
         return;
 
+    /* Raster-effect accounting. The frame is drawn only after all of it
+     * has been emulated, so any VDP state a game changes part-way down
+     * the screen is lost — every line is drawn with the end-of-frame
+     * value. Counting the writes that land during active display says
+     * whether a game relies on that. */
+#ifdef VDP_RASTER_PROFILE
+    {
+        extern int scan_line, screen_height;
+        vdp_reg_writes_total++;
+        if (scan_line > 0 && scan_line < screen_height &&
+            gwenesis_vdp_regs[reg] != value) {
+            vdp_reg_writes_active++;
+            if (reg < 64) vdp_reg_active_mask[reg]++;
+        }
+    }
+#endif
     gwenesis_vdp_regs[reg] = value;
     vdpm_log(__FUNCTION__, "reg:%02d <- %02x", reg, value);
 
@@ -320,6 +376,7 @@ void push_fifo(unsigned int value) {
 
 //static inline __attribute__((always_inline))
 void __not_in_flash_func(gwenesis_vdp_vram_write)(unsigned int address, unsigned int value) {
+    RASTER_NOTE_VRAM();
     VRAM[address] = value;
 
     // Update internal SAT Cache
@@ -416,6 +473,7 @@ void gwenesis_vdp_dma_fill(unsigned short value) {
         case 0x3: // undocumented and buggy, see vdpfifotesting
             do {
                 uint8_t addr = (address_reg & 0x7f) >> 1;
+                RASTER_NOTE_CRAM(addr, fifo[3]);
                 CRAM[addr] = fifo[3];
 
                 graphics_set_palette(addr, RGB888(CRAM_R(CRAM[addr]), CRAM_G(CRAM[addr]), CRAM_B(CRAM[addr])));
@@ -427,6 +485,7 @@ void gwenesis_vdp_dma_fill(unsigned short value) {
             break;
         case 0x5: // undocumented and buggy, see vdpfifotesting:
             do {
+                RASTER_NOTE_VSRAM();
                 VSRAM[(address_reg & 0x7f) >> 1] = fifo[3] & 0x03FF;
                 address_reg += REG15_DMA_INCREMENT;
                 src_addr_low++;
@@ -501,6 +560,7 @@ void gwenesis_vdp_dma_m68k() {
                     value = FETCH16RAM(src_addr);
                     push_fifo(value);
                     uint8_t addr = (address_reg & 0x7f) >> 1;
+                RASTER_NOTE_CRAM(addr, value);
                     CRAM[addr] = value;
 
                     graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
@@ -516,6 +576,7 @@ void gwenesis_vdp_dma_m68k() {
                 do {
                     value = FETCH16RAM(src_addr);
                     push_fifo(value);
+                    RASTER_NOTE_VSRAM();
                     VSRAM[(address_reg & 0x7f) >> 1] = value & 0x03FF;
                     address_reg += REG15_DMA_INCREMENT;
                     src_addr += 2;
@@ -551,6 +612,7 @@ void gwenesis_vdp_dma_m68k() {
                     value = FETCH16ROM(src_addr);
                     push_fifo(value);
                     uint8_t addr = (address_reg & 0x7f) >> 1;
+                RASTER_NOTE_CRAM(addr, value);
                     CRAM[addr] = value;
 
                     graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
@@ -566,6 +628,7 @@ void gwenesis_vdp_dma_m68k() {
                 do {
                     value = FETCH16ROM(src_addr);
                     push_fifo(value);
+                    RASTER_NOTE_VSRAM();
                     VSRAM[(address_reg & 0x7f) >> 1] = value & 0x03FF;
                     address_reg += REG15_DMA_INCREMENT;
                     src_addr += 2;
@@ -773,6 +836,7 @@ void gwenesis_vdp_write_data_port_16(unsigned int value) {
             // address_reg, REG15_DMA_INCREMENT, value);
         {
             uint8_t addr = (address_reg & 0x7f) >> 1;
+                RASTER_NOTE_CRAM(addr, value);
             CRAM[addr] = value;
 
             graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));

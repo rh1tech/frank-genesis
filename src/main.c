@@ -769,6 +769,15 @@ static void __scratch_x("sound") sound_core(void) {
  * Core 0 draws line 0 itself first: that is where
  * gwenesis_vdp_render_line() computes the plane geometry the rest of the
  * frame reads, so it has to be done before core 1 starts. */
+/* Draw each line as the beam reaches it instead of drawing the whole
+ * frame afterwards. Comix Zone rewrites VRAM while the beam is in the
+ * visible field (measured: 171 writes per frame during active display),
+ * so drawing at end of frame gives every line the final contents and its
+ * page-fold comes out as banded garbage. */
+#ifndef VDP_RASTER_RENDER
+#define VDP_RASTER_RENDER 0
+#endif
+
 #ifndef VDP_SPLIT_RENDER
 #define VDP_SPLIT_RENDER 1
 #endif
@@ -795,7 +804,7 @@ static void screen_verify_frame(void) {
 }
 #endif
 
-volatile int  vdp_job_from, vdp_job_to, vdp_job_step;
+volatile int  vdp_job_from, vdp_job_to, vdp_job_step, vdp_job_line;
 volatile bool vdp_job_done;
 /* Claimed with an atomic exchange so exactly one core runs the job. Core
  * 1 takes it when it can, but it spends most of a frame blocked feeding
@@ -812,12 +821,50 @@ static bool vdp_job_take(void) {
     return __atomic_exchange_n(&vdp_job_claim, 0, __ATOMIC_ACQUIRE) == 1;
 }
 
+#if VDP_RASTER_RENDER
+/* One line in flight: core 1 draws line N while core 0 emulates line
+ * N+1. Drawing a line costs about half what emulating one does, so core
+ * 1 keeps up and core 0 rarely waits; when core 1 is busy elsewhere
+ * (it also feeds I2S and runs the link) core 0 reclaims the line and
+ * draws it itself, which is exactly the single-core behaviour.
+ *
+ * The renderer therefore sees VDP state one line ahead of the beam
+ * rather than a whole frame ahead — enough for the mid-frame VRAM
+ * rewrites these effects depend on. */
+volatile bool vdp_job_busy;
+
+void vdp_render_worker_poll(void) {
+    if (!vdp_job_take()) return;
+    gwenesis_vdp_render_line(vdp_job_line);
+    __dmb();
+    vdp_job_done = true;
+}
+
+static void vdp_pipeline_sync(void) {
+    if (!vdp_job_busy) return;
+    if (vdp_job_take()) {
+        gwenesis_vdp_render_line(vdp_job_line);   /* core 1 never took it */
+    } else {
+        while (!vdp_job_done) tight_loop_contents();
+    }
+    vdp_job_done = false;
+    vdp_job_busy = false;
+}
+
+static inline void vdp_pipeline_post(int line) {
+    vdp_pipeline_sync();
+    vdp_job_line = line;
+    vdp_job_busy = true;
+    __atomic_store_n(&vdp_job_claim, 1, __ATOMIC_RELEASE);
+}
+#else
 void vdp_render_worker_poll(void) {
     if (!vdp_job_take()) return;
     vdp_render_range(vdp_job_from, vdp_job_to, vdp_job_step);
     __dmb();
     vdp_job_done = true;
 }
+#endif
 
 // Main emulation loop
 static void __time_critical_func(emulation_loop)(void) {
@@ -1139,6 +1186,11 @@ static void __time_critical_func(emulation_loop)(void) {
                 hint_counter = gwenesis_vdp_regs[10];
             }
             
+#if VDP_RASTER_RENDER
+            if (render_this_frame && scan_line < screen_height) {
+                vdp_pipeline_post(scan_line);
+            }
+#endif
             scan_line++;
             
             // VBlank
@@ -1207,6 +1259,10 @@ static void __time_critical_func(emulation_loop)(void) {
         if (render_this_frame) {
             PROFILE_START();
             uint64_t render_start_us = time_us_64();
+#if VDP_RASTER_RENDER
+            vdp_pipeline_sync();        /* retire the last line in flight */
+            (void)render_start_us;
+#else
 #if LINE_INTERLACE
             // Line interlacing: render every other line, then duplicate
             // Alternates between even and odd lines each frame for better quality
@@ -1250,6 +1306,7 @@ static void __time_critical_func(emulation_loop)(void) {
             }
 #endif
 #endif
+#endif
 #ifdef SCREEN_VERIFY
             screen_verify_frame();
 #endif
@@ -1263,6 +1320,12 @@ static void __time_critical_func(emulation_loop)(void) {
 #endif
         }
         
+        {   /* per-frame peak of mid-frame palette changes */
+            extern uint32_t cram_changes_this_frame, cram_changes_max;
+            if (cram_changes_this_frame > cram_changes_max)
+                cram_changes_max = cram_changes_this_frame;
+            cram_changes_this_frame = 0;
+        }
         frame_counter++;
         m68k.cycles -= system_clock;
 
