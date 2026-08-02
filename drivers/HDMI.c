@@ -419,9 +419,20 @@ static inline void irq_remove_handler_DMA_core1() {
     irq_remove_handler(VIDEO_DMA_IRQ, irq_get_exclusive_handler(VIDEO_DMA_IRQ));
 }
 
+/* Install the handler, but do not enable it here.
+ *
+ * irq_set_enabled() acts on the calling core's NVIC, and graphics_init()
+ * runs on core 0 — so despite the name this scanout IRQ was firing on
+ * the core that emulates, building every output line there. It belongs
+ * on core 1, which spends much of a frame idle waiting for a DMA slot.
+ * Core 1 claims it with hdmi_irq_enable_here(). */
 static inline void irq_set_exclusive_handler_DMA_core1() {
     irq_set_exclusive_handler(VIDEO_DMA_IRQ, dma_handler_HDMI);
     irq_set_priority(VIDEO_DMA_IRQ, 0);
+}
+
+/* Enable the scanout IRQ on whichever core calls this. */
+void hdmi_irq_enable_here(void) {
     irq_set_enabled(VIDEO_DMA_IRQ, true);
 }
 

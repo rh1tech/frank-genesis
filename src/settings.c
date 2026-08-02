@@ -89,7 +89,12 @@ settings_t g_settings = {
     .z80_enabled = true,
     .audio_enabled = true,
     .channel_mask = 0x7F,  // All 7 channels enabled (bits 0-6)
-    .frameskip = 3,  // Default: high (30fps)
+    /* None: the master can now sustain every frame. Sound and the Z80 run
+     * on the second RP2350 and the frame's lines are drawn across both of
+     * this chip's cores, which leaves core 0 idle ~93% of a frame on the
+     * Comix Zone demo at a sustained 60.05 fps. Skipping 4 frames in 6 was
+     * hiding that behind 20 fps of video. */
+    .frameskip = 0,
     .gamepad2_mode = GAMEPAD2_MODE_NES,  // Default: NES gamepad 2
     .browser_path = {0},
     .browser_file = {0}
@@ -763,10 +768,15 @@ static bool parse_ini_line(const char *line, const char *key, char *value, size_
     return true;
 }
 
+/* Bumped when a default changes in a way that should override what an
+ * existing card already has. */
+#define SETTINGS_VERSION 2
+
 void settings_load(void) {
     FIL file;
     char line[128];
     char value[64];
+    int  file_version = 1;          /* files without the key predate it */
     
     // Set defaults first
     g_settings.cpu_freq = 504;
@@ -779,7 +789,7 @@ void settings_load(void) {
     g_settings.z80_enabled = true;
     g_settings.audio_enabled = true;
     g_settings.channel_mask = 0x7F;  // All channels on
-    g_settings.frameskip = 3;  // Default: high
+    g_settings.frameskip = 0;  // Default: none — the master can sustain every frame
     g_settings.gamepad2_mode = GAMEPAD2_MODE_NES;  // Default: NES
     g_settings.browser_path[0] = '\0';
     g_settings.browser_file[0] = '\0';
@@ -857,6 +867,9 @@ void settings_load(void) {
             bool en = (strcasecmp(value, "on") == 0 || strcmp(value, "1") == 0);
             g_settings.channel_mask = CHANNEL_SET(g_settings.channel_mask, 6, en);
         }
+        else if (parse_ini_line(line, "settings_version", value, sizeof(value))) {
+            file_version = atoi(value);
+        }
         else if (parse_ini_line(line, "frameskip", value, sizeof(value))) {
             int level = atoi(value);
             if (level >= 0 && level <= FRAMESKIP_MAX_LEVEL) {
@@ -885,6 +898,18 @@ void settings_load(void) {
     }
     
     f_close(&file);
+
+    /* Cards written before version 2 carry frameskip = HIGH, which was
+     * chosen when the master had to emulate, draw and mix sound on its
+     * own. Sound now runs on the second RP2350 and the lines are drawn
+     * across both of this chip's cores, so every frame fits: the
+     * measured demo holds 60.05 fps with core 0 idle most of a frame.
+     * Leaving the old value in place would keep showing 20 fps of video
+     * on hardware that no longer needs to skip. */
+    if (file_version < 2) {
+        g_settings.frameskip = 0;
+        settings_save();
+    }
 }
 
 bool settings_save(void) {
@@ -905,6 +930,7 @@ bool settings_save(void) {
         "; FRANK Genesis Settings\n"
         "; This file is auto-generated. Edit with care.\n"
         "\n"
+        "settings_version = %d\n"
         "cpu_freq = %d\n"
         "psram_freq = %d\n"
         "z80 = %s\n"
@@ -928,6 +954,7 @@ bool settings_save(void) {
         "; File browser state (auto-saved; do not edit manually)\n"
         "browser_path = %s\n"
         "browser_file = %s\n",
+        SETTINGS_VERSION,
         g_settings.cpu_freq,
         g_settings.psram_freq,
         g_settings.z80_enabled ? "on" : "off",

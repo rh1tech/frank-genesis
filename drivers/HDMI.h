@@ -69,6 +69,7 @@ void graphics_set_shift(int x, int y);
  * that the scanout used to do inline. One load replaces mask + compare. */
 extern const uint8_t *hdmi_line_lut[HDMI_MAX_LINES];
 extern uint8_t hdmi_identity_lut[256];
+void hdmi_irq_enable_here(void);
 void hdmi_line_lut_init(void);
 void hdmi_line_lut_reset(void);
 

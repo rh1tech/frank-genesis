@@ -662,6 +662,11 @@ static void setup_genesis_palette(void) {
 void vdp_render_worker_poll(void);   /* defined with the emulation loop */
 
 static void __scratch_x("sound") sound_core(void) {
+    /* Take the scanout IRQ before anything else: nothing services it
+     * between graphics_init() on core 0 and this point, and audio_init()
+     * below sleeps half a second. */
+    hdmi_irq_enable_here();
+
     // Allow core 0 to pause this core during flash operations
     multicore_lockout_victim_init();
     
@@ -1015,11 +1020,21 @@ static void __time_critical_func(emulation_loop)(void) {
                     last_screen_width = saved_screen_width;
                     last_screen_height = saved_screen_height;
                     
-                    // Keep buttons locked, wait for ALL buttons to be released
+                    /* Keep buttons locked until everything that could
+                     * reopen the menu is released.
+                     *
+                     * This waited on the gamepad only and never pumped the
+                     * USB stack, so closing the menu with ESC left the key
+                     * still reading as held: the loop below saw the hotkey
+                     * and reopened the menu immediately. */
                     do {
+#ifdef USB_HID_ENABLED
+                        usbhid_task();
+#endif
                         sleep_ms(50);
                         nespad_read();
-                    } while (nespad_state & (DPAD_A | DPAD_B | DPAD_START | DPAD_SELECT));
+                    } while ((nespad_state & (DPAD_A | DPAD_B | DPAD_START | DPAD_SELECT)) ||
+                             settings_check_hotkey());
                     
                     // Extra delay to ensure clean release
                     sleep_ms(100);
@@ -1677,6 +1692,15 @@ int main(void) {
             g_settings.channel_mask & 0x3F,
             CHANNEL_ENABLED(g_settings.channel_mask, 6) ? "on" : "off");
     }
+
+    /* These two were never applied at boot: this block duplicates
+     * settings_apply_runtime() but had drifted from it, so the frameskip
+     * level kept whatever the compiled-in pattern was no matter what the
+     * menu or the ini said. */
+    set_frameskip_level(g_settings.frameskip);
+    vdp_palette_split_enabled = g_settings.raster_palette;
+    LOG("Frameskip: level %u, Raster palette: %s\n",
+        g_settings.frameskip, g_settings.raster_palette ? "on" : "off");
     
     // Check if CPU/PSRAM frequencies need to change
     uint32_t current_cpu_mhz = clock_get_hz(clk_sys) / 1000000;
