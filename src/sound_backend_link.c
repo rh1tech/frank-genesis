@@ -63,6 +63,7 @@ static uint32_t     event_count[2];
 static volatile uint32_t event_sent[2];
 static uint32_t     pending_sent;
 uint32_t            link_pushes, link_push_us;
+uint32_t            link_push_lock_us, link_push_xfer_us;
 
 /* Both cores drive the link now, so they must not interleave. */
 static volatile int link_busy;
@@ -151,6 +152,8 @@ void sound_link_push(void) {
 
     uint64_t t0 = time_us_64();
     link_lock();
+    link_push_lock_us += (uint32_t)(time_us_64() - t0);
+    uint64_t t1 = time_us_64();
     int      w = event_write;          /* re-read: core 0 may have flipped */
     uint32_t n = event_count[w];
     uint32_t sent = event_sent[w];
@@ -159,6 +162,7 @@ void sound_link_push(void) {
         event_sent[w] = n;
         link_pushes++;
     }
+    link_push_xfer_us += (uint32_t)(time_us_64() - t1);
     link_unlock();
     link_push_us += (uint32_t)(time_us_64() - t0);
 }

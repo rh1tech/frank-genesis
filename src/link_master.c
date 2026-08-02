@@ -252,6 +252,7 @@ bool link_master_upload_rom(const uint8_t *rom, uint32_t bytes) {
 }
 
 uint32_t link_sync_fails, link_syncs;
+uint32_t link_us_sc, link_us_bs, link_us_rc, link_n_sc;
 uint32_t link_us_ctrl, link_us_events, link_us_ack, link_us_samples,
          link_us_snapshot, link_snapshots;
 
@@ -276,14 +277,22 @@ bool link_master_sync_peek(const link_event_t *events, uint32_t count,
      * not a value back. Tell the slave, so it can acknowledge before it
      * replays instead of making us wait for its Z80 to catch up. */
     uint32_t arg1 = offset | (out ? 0u : LINK_SYNC_NO_PEEK);
+    uint64_t p0 = time_us_64();
     bool ok = link_m_send_ctrl(&session, LINK_OP_SYNC, count, arg1, NULL, 0);
+    uint64_t p1 = time_us_64();
     if (ok && count) {
         ok = link_m_bulk_send(&session, events, count * sizeof(link_event_t));
     }
+    uint64_t p2 = time_us_64();
     if (ok) {
         ok = link_m_recv_ctrl(&session) &&
              link_rx_hdr(&session)->op == LINK_OP_SYNC_ACK;
     }
+    uint64_t p3 = time_us_64();
+    link_us_sc += (uint32_t)(p1 - p0);
+    link_us_bs += (uint32_t)(p2 - p1);
+    link_us_rc += (uint32_t)(p3 - p2);
+    link_n_sc++;
     if (ok && out) *out = (uint8_t)(link_rx_hdr(&session)->arg0 & 0xFF);
 
     session.handshake_timeout_us = 0;
