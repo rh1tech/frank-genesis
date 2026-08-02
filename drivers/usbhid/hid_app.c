@@ -471,8 +471,11 @@ static uint16_t hid_to_kbd_state_bit(uint8_t keycode) {
         // Space -> Select
         case 0x2C: return 0x1000; // Space -> KBD_STATE_SELECT
         
-        // ESC -> Settings menu
+        // ESC -> back/cancel inside menus
         case 0x29: return 0x2000; // Escape -> KBD_STATE_ESC
+
+        // F12 -> open the settings menu
+        case 0x45: return 0x4000; // F12 -> KBD_STATE_MENU
         
         default: return 0;
     }

@@ -20,6 +20,7 @@ extern "C" {
 #define GENESIS_KEY_MODE   0x0C
 #define GENESIS_KEY_SELECT 0x0D
 #define GENESIS_KEY_ESC    0x0E
+#define GENESIS_KEY_MENU   0x0F
 
 // Keyboard state bits for ps2kbd_get_state()
 #define KBD_STATE_UP     (1 << 0)
@@ -36,6 +37,9 @@ extern "C" {
 #define KBD_STATE_MODE   (1 << 11)
 #define KBD_STATE_SELECT (1 << 12)
 #define KBD_STATE_ESC    (1 << 13)
+/* F12 opens the settings menu. Kept separate from ESC so ESC can go on
+ * meaning "back" inside the menu, which is what it is for. */
+#define KBD_STATE_MENU   (1 << 14)
 
 void ps2kbd_init(void);
 void ps2kbd_tick(void);

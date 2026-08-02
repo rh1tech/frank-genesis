@@ -97,8 +97,11 @@ static unsigned char hid_to_genesis(uint8_t code) {
         case 0xE2: return GENESIS_KEY_MODE;   // Left Alt
         case 0xE6: return GENESIS_KEY_MODE;   // Right Alt
         
-        // ESC = Settings menu / Back
+        // ESC = Back
         case 0x29: return GENESIS_KEY_ESC;    // Escape
+
+        // F12 = Settings menu
+        case 0x45: return GENESIS_KEY_MENU;   // F12
         
         default: return 0;
     }
@@ -160,6 +163,7 @@ static uint16_t key_to_state_bit(uint8_t key) {
         case GENESIS_KEY_MODE:   return KBD_STATE_MODE;
         case GENESIS_KEY_SELECT: return KBD_STATE_SELECT;
         case GENESIS_KEY_ESC:    return KBD_STATE_ESC;
+        case GENESIS_KEY_MENU:   return KBD_STATE_MENU;
         default: return 0;
     }
 }

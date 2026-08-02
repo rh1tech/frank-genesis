@@ -44,9 +44,9 @@ extern settings_t g_settings;
 
 // Settings menu result
 typedef enum {
-    SETTINGS_RESULT_CANCEL,         // User pressed cancel
-    SETTINGS_RESULT_SAVE_RESTART,   // Save settings and restart
-    SETTINGS_RESULT_RESTART,        // Restart without saving
+    SETTINGS_RESULT_RESUME,         // Close the menu and carry on playing
+    SETTINGS_RESULT_SAVE_RESTART,   // Write settings to SD and reboot the board
+    SETTINGS_RESULT_ROM_SELECT,     // Unload the ROM and go back to the browser
 } settings_result_t;
 
 /**

@@ -341,7 +341,7 @@ static uint32_t read_selector_buttons(void) {
     if (kbd & KBD_STATE_A)     buttons |= DPAD_A;
     if (kbd & KBD_STATE_B)     buttons |= DPAD_B;
     if (kbd & KBD_STATE_START) buttons |= DPAD_START;
-    if (kbd & KBD_STATE_ESC)   buttons |= (DPAD_SELECT | DPAD_START);
+    if (kbd & KBD_STATE_MENU)  buttons |= (DPAD_SELECT | DPAD_START);
 
 #ifdef USB_HID_ENABLED
     usbhid_task();
@@ -1061,11 +1061,10 @@ static bool file_browser_show(uint8_t *screen_buffer, char *out_path, size_t out
                     watchdog_reboot(0, 0, 10);
                     while (1) tight_loop_contents();
                     break;
-                case SETTINGS_RESULT_RESTART:
-                    watchdog_reboot(0, 0, 10);
-                    while (1) tight_loop_contents();
-                    break;
-                case SETTINGS_RESULT_CANCEL:
+                case SETTINGS_RESULT_ROM_SELECT:
+                    /* Already in the browser -- "back to ROM select" just
+                     * means close the menu. */
+                case SETTINGS_RESULT_RESUME:
                 default:
                     if (saved_screen_buffer)
                         memcpy(screen_buffer, saved_screen_buffer, SCREEN_WIDTH * SCREEN_HEIGHT);

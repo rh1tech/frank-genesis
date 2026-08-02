@@ -562,16 +562,36 @@ static bool load_rom(const char *filename) {
         return false;
     }
     
-    // Allocate ROM buffer in PSRAM (size based on actual file, rounded up to 64KB)
-    size_t alloc_size = (file_size + 0xFFFF) & ~0xFFFF;  // Round up to 64KB boundary
+    /* Allocate the ROM buffer once and keep it.
+     *
+     * The player can now leave a game and pick another without rebooting,
+     * so this runs more than once per power-up -- and PSRAM is a bump
+     * allocator whose free() is a no-op, so growing the buffer per ROM
+     * would leak the old one every time. Instead take a capacity big
+     * enough for any ordinary cartridge on the first load and reuse it.
+     *
+     * Sizing it to the first ROM would have been worse than a leak: a
+     * 2 MB game followed by a 4 MB one would have read straight past the
+     * end of the buffer and corrupted the heap behind it. */
+    #define ROM_BUFFER_CAPACITY 0x400000u   /* 4 MB covers every standard cart */
+    static size_t rom_buffer_capacity = 0;
     if (rom_buffer == NULL) {
-        rom_buffer = (uint8_t *)psram_malloc(alloc_size);
+        size_t want = (file_size + 0xFFFF) & ~0xFFFF;   /* round up to 64 KB */
+        if (want < ROM_BUFFER_CAPACITY) want = ROM_BUFFER_CAPACITY;
+        rom_buffer = (uint8_t *)psram_malloc(want);
         if (rom_buffer == NULL) {
-            LOG("Failed to allocate ROM buffer (%lu bytes)!\n", (unsigned long)alloc_size);
+            LOG("Failed to allocate ROM buffer (%lu bytes)!\n", (unsigned long)want);
             f_close(&file);
             return false;
         }
-        LOG("Allocated %lu bytes for ROM\n", (unsigned long)alloc_size);
+        rom_buffer_capacity = want;
+        LOG("Allocated %lu bytes for ROM\n", (unsigned long)want);
+    }
+    if ((size_t)file_size > rom_buffer_capacity) {
+        LOG("ROM needs %lu bytes but the buffer holds %lu\n",
+            (unsigned long)file_size, (unsigned long)rom_buffer_capacity);
+        f_close(&file);
+        return false;
     }
     
     // Read ROM into buffer
@@ -1026,13 +1046,23 @@ static void __time_critical_func(emulation_loop)(void) {
                     while(1) tight_loop_contents();
                     break;
                     
-                case SETTINGS_RESULT_RESTART:
-                    // Restart without saving
-                    watchdog_reboot(0, 0, 10);
-                    while(1) tight_loop_contents();
-                    break;
-                    
-                case SETTINGS_RESULT_CANCEL:
+                case SETTINGS_RESULT_ROM_SELECT:
+                    /* Drop the game and hand control back to the browser
+                     * without rebooting.
+                     *
+                     * The menu has already forced 320x240 and muted the
+                     * sound chips, which is what the browser wants, and it
+                     * paints its own palette on entry. So all that is left
+                     * is to blank the abandoned frame and unwind: main()
+                     * loops straight back round to rom_selector_show().
+                     * Core 1 keeps running throughout, exactly as it does
+                     * on the first pass at boot. */
+                    LOG("Leaving game for the ROM browser\n");
+                    memset((uint8_t *)SCREEN, 0, SCREEN_WIDTH * SCREEN_HEIGHT);
+                    button_lock = false;
+                    return;
+
+                case SETTINGS_RESULT_RESUME:
                 default:
                     // Restore Genesis palette FIRST (before screen is visible)
                     for (int i = 0; i < 64; i++) {
@@ -1745,6 +1775,21 @@ int main(void) {
     // Show ROM selector
     LOG("Showing ROM selector...\n");
     static char selected_rom[MAX_ROM_PATH];
+
+    // Allocate screen save buffer for the in-game settings menu.
+    // Once only: the loop below returns here every time the user picks
+    // "back to ROM select", and re-allocating would leak.
+    saved_game_screen = (uint8_t *)psram_malloc(SCREEN_WIDTH * SCREEN_HEIGHT);
+    if (saved_game_screen == NULL) {
+        LOG("Warning: Could not allocate screen save buffer\n");
+    }
+
+    /* Each pass picks a ROM, runs it, and comes back here when the
+     * player leaves the game from the settings menu. The autoboot
+     * shortcuts are first-pass only -- on the way back the player
+     * asked for the browser, so give them the browser. */
+    bool first_launch = true;
+    for (;;) {
     
 #if AUTOBOOT_LAST_ROM
     /* Development aid, off by default: boot straight into the ROM the
@@ -1777,12 +1822,12 @@ int main(void) {
     /* An explicit path wins over the saved browser position: saved
      * settings can be corrupt, and a development aid that depends on
      * them is useless exactly when the board is in a bad state. */
-    if (1) {
+    if (first_launch) {
         snprintf(selected_rom, sizeof(selected_rom), "%s", AUTOBOOT_PATH);
         LOG("Autoboot (fixed): %s\n", selected_rom);
     } else
 #endif
-    if (autoboot_ok) {
+    if (first_launch && autoboot_ok) {
         snprintf(selected_rom, sizeof(selected_rom), "%s%s%s",
                  g_settings.browser_path,
                  g_settings.browser_path[0] &&
@@ -1806,10 +1851,11 @@ int main(void) {
     // Load selected ROM
     LOG("Loading ROM: %s\n", selected_rom);
     if (!load_rom(selected_rom)) {
+        /* Back to the browser rather than a dead board: the player can
+         * pick something else. */
         LOG("Failed to load ROM: %s\n", selected_rom);
-        while (1) {
-            tight_loop_contents();
-        }
+        first_launch = false;
+        continue;
     }
     
 #ifdef USE_SOUND_LINK
@@ -1859,20 +1905,21 @@ int main(void) {
 
     // Initialize emulator
     genesis_init();
-    
-    // Allocate screen save buffer for in-game settings menu
-    saved_game_screen = (uint8_t *)psram_malloc(SCREEN_WIDTH * SCREEN_HEIGHT);
-    if (saved_game_screen == NULL) {
-        LOG("Warning: Could not allocate screen save buffer\n");
-    }
-    
-    // Audio is initialized on Core 1 (render_core)
-    
+
+    /* The settings menu mutes every sound chip on its way out, so a game
+     * started from that path would otherwise come up silent. */
+    settings_apply_runtime();
+    audio_set_enabled(g_settings.audio_enabled);
+
+    first_launch = false;
+
     LOG("Starting emulation...\n");
-    
-    // Run emulation
+
+    // Run emulation. Returns only when the player chose to leave the
+    // game, at which point we go round again and show the browser.
     emulation_loop();
-    
+    }
+
     return 0;
 }
 

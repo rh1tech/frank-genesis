@@ -58,8 +58,8 @@ typedef enum {
     MENU_GAMEPAD2,
     MENU_SEPARATOR,  // Visual separator
     MENU_SAVE_RESTART,
-    MENU_RESTART,
-    MENU_CANCEL,
+    MENU_ROM_SELECT,
+    MENU_RESUME,
     MENU_ITEM_COUNT
 } menu_item_t;
 
@@ -222,18 +222,72 @@ static const uint8_t *glyph_5x7(char ch) {
     }
 }
 
+/* Menu composition.
+ *
+ * draw_settings_menu() used to clear the live framebuffer and then draw
+ * into it. Scanout is continuous, so on every redraw -- and a redraw
+ * happens on each navigation step -- the display showed a fully black
+ * screen for as long as the redraw took. That is the menu flicker.
+ *
+ * The fix is to compose off-screen and blit a finished picture, so the
+ * visible buffer only ever goes from one complete image to another. A
+ * full 320x240 back buffer is 75 KB and there is nothing like that much
+ * SRAM left, so the menu is composed one horizontal band at a time: the
+ * unmodified drawing code runs once per band with everything outside
+ * that band clipped away, and each finished band is copied out.
+ */
+#define MENU_BAND_H 24
+static uint8_t menu_band[SCREEN_WIDTH * MENU_BAND_H];
+static uint8_t *band_dst;      /* NULL: draw straight at the caller's buffer */
+static int      band_y0, band_h;
+
+/* The row to write for screen line y, or NULL if it is not currently
+ * being composed. */
+static inline uint8_t *draw_row(uint8_t *screen, int y) {
+    if (band_dst) {
+        int by = y - band_y0;
+        if (by < 0 || by >= band_h) return NULL;
+        return band_dst + by * SCREEN_WIDTH;
+    }
+    if (y < 0 || y >= SCREEN_HEIGHT) return NULL;
+    return screen + y * SCREEN_WIDTH;
+}
+
+static void paint_settings_menu(uint8_t *screen, int selected);
+static void paint_channel_menu(uint8_t *screen, int selected);
+
+/* Run a menu painter band by band, blitting each finished band. */
+static void compose_banded(void (*paint)(uint8_t *, int), uint8_t *screen, int arg) {
+    for (int y0 = 0; y0 < SCREEN_HEIGHT; y0 += MENU_BAND_H) {
+        int h = SCREEN_HEIGHT - y0;
+        if (h > MENU_BAND_H) h = MENU_BAND_H;
+        band_dst = menu_band; band_y0 = y0; band_h = h;
+        paint(screen, arg);
+        band_dst = NULL;
+        memcpy(screen + y0 * SCREEN_WIDTH, menu_band, (size_t)SCREEN_WIDTH * h);
+    }
+}
+
+static void draw_settings_menu(uint8_t *screen, int selected) {
+    compose_banded(paint_settings_menu, screen, selected);
+}
+
+static void draw_channel_menu(uint8_t *screen, int selected) {
+    compose_banded(paint_channel_menu, screen, selected);
+}
+
 // Draw a single character
 static void draw_char(uint8_t *screen, int x, int y, char ch, uint8_t color) {
     const uint8_t *rows = glyph_5x7(ch);
     for (int row = 0; row < FONT_HEIGHT; ++row) {
-        int yy = y + row;
-        if (yy < 0 || yy >= SCREEN_HEIGHT) continue;
+        uint8_t *dst = draw_row(screen, y + row);
+        if (!dst) continue;
         uint8_t bits = rows[row];
         for (int col = 0; col < 5; ++col) {
             int xx = x + col;
             if (xx < 0 || xx >= SCREEN_WIDTH) continue;
             if (bits & (1u << (4 - col))) {
-                screen[yy * SCREEN_WIDTH + xx] = color;
+                dst[xx] = color;
             }
         }
     }
@@ -259,17 +313,20 @@ static void fill_rect(uint8_t *screen, int x, int y, int w, int h, uint8_t color
     if (color == 0) color = 1;  // Avoid index 0 for HDMI compatibility
     
     for (int yy = y; yy < y + h; ++yy) {
-        memset(&screen[yy * SCREEN_WIDTH + x], color, (size_t)w);
+        uint8_t *dst = draw_row(screen, yy);
+        if (!dst) continue;
+        memset(&dst[x], color, (size_t)w);
     }
 }
 
 // Draw horizontal line
 static void draw_hline(uint8_t *screen, int x, int y, int w, uint8_t color) {
-    if (y < 0 || y >= SCREEN_HEIGHT) return;
+    uint8_t *dst = draw_row(screen, y);
+    if (!dst) return;
     if (x < 0) { w += x; x = 0; }
     if (x + w > SCREEN_WIDTH) w = SCREEN_WIDTH - x;
     if (w <= 0) return;
-    memset(&screen[y * SCREEN_WIDTH + x], color, (size_t)w);
+    memset(&dst[x], color, (size_t)w);
 }
 
 // Get index of current CRT dim value
@@ -296,8 +353,8 @@ static const char* get_menu_label(menu_item_t item) {
         case MENU_GAMEPAD2:     return "GAMEPAD 2";
         case MENU_SEPARATOR:    return "";
         case MENU_SAVE_RESTART: return "SAVE AND RESTART";
-        case MENU_RESTART:      return "RESTART WITHOUT SAVING";
-        case MENU_CANCEL:       return "CANCEL";
+        case MENU_ROM_SELECT:   return "BACK TO ROM SELECT";
+        case MENU_RESUME:       return "BACK TO GAME";
         default:                return "";
     }
 }
@@ -499,7 +556,7 @@ static int get_next_channel_selectable(int current, int direction) {
     return next;
 }
 
-static void draw_channel_menu(uint8_t *screen, int selected) {
+static void paint_channel_menu(uint8_t *screen, int selected) {
     // Clear screen
     fill_rect(screen, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
     
@@ -671,8 +728,8 @@ static bool show_channel_submenu(uint8_t *screen_buffer) {
     }
 }
 
-// Draw the entire settings menu
-static void draw_settings_menu(uint8_t *screen, int selected) {
+// Paint the settings menu (runs once per band)
+static void paint_settings_menu(uint8_t *screen, int selected) {
     // Clear screen
     fill_rect(screen, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
     
@@ -1077,8 +1134,8 @@ settings_result_t settings_menu_show_with_restore(uint8_t *screen_buffer, uint8_
     const uint32_t REPEAT_DELAY = 10;
     const uint32_t REPEAT_RATE = 3;
     
-    // Clear screen and draw settings menu
-    memset(screen_buffer, COLOR_BLACK, SCREEN_WIDTH * SCREEN_HEIGHT);
+    /* No pre-clear: the painter covers every row, and clearing first
+     * just put one extra black frame in front of the scanout. */
     draw_settings_menu(screen_buffer, selected);
     
     // Small delay to let display settle
@@ -1196,8 +1253,10 @@ settings_result_t settings_menu_show_with_restore(uint8_t *screen_buffer, uint8_
                     memcpy(&g_settings, &edit_settings, sizeof(settings_t));
                     return SETTINGS_RESULT_SAVE_RESTART;
                     
-                case MENU_RESTART:
-                    return SETTINGS_RESULT_RESTART;
+                case MENU_ROM_SELECT:
+                    /* Audio stays muted: the caller tears the game down
+                     * and the browser has no sound of its own. */
+                    return SETTINGS_RESULT_ROM_SELECT;
                     
                 case MENU_CHANNELS:
                     // Open channel submenu
@@ -1207,7 +1266,7 @@ settings_result_t settings_menu_show_with_restore(uint8_t *screen_buffer, uint8_
                     }
                     break;
                     
-                case MENU_CANCEL: {
+                case MENU_RESUME: {
                     // Wait for all buttons to be released for multiple consecutive reads
                     int release_count = 0;
                     while (release_count < 5) {
@@ -1227,7 +1286,7 @@ settings_result_t settings_menu_show_with_restore(uint8_t *screen_buffer, uint8_
                     ym2612_dac_enabled = saved_ym2612_dac_enabled;
                     sn76489_enabled = saved_sn76489_enabled;
                     audio_set_enabled(true);
-                    return SETTINGS_RESULT_CANCEL;
+                    return SETTINGS_RESULT_RESUME;
                 }
                     
                 default:
@@ -1259,7 +1318,7 @@ settings_result_t settings_menu_show_with_restore(uint8_t *screen_buffer, uint8_
             ym2612_dac_enabled = saved_ym2612_dac_enabled;
             sn76489_enabled = saved_sn76489_enabled;
             audio_set_enabled(true);
-            return SETTINGS_RESULT_CANCEL;
+            return SETTINGS_RESULT_RESUME;
         }
         
         if (needs_redraw) {
@@ -1276,16 +1335,16 @@ settings_result_t settings_menu_show_with_restore(uint8_t *screen_buffer, uint8_
     ym2612_dac_enabled = saved_ym2612_dac_enabled;
     sn76489_enabled = saved_sn76489_enabled;
     audio_set_enabled(true);
-    return SETTINGS_RESULT_CANCEL;
+    return SETTINGS_RESULT_RESUME;
 }
 
 bool settings_check_hotkey(void) {
-    // Check if Start+Select are both pressed (gamepad), or ESC on keyboard
+    // Check if Start+Select are both pressed (gamepad), or F12 on keyboard
     nespad_read();
     
     bool start_select = (nespad_state & DPAD_SELECT) && (nespad_state & DPAD_START);
     
-    // Check PS/2 keyboard for ESC
+    // Check PS/2 keyboard for F12
     ps2kbd_tick();
     uint16_t kbd_state = ps2kbd_get_state();
     
@@ -1294,7 +1353,7 @@ bool settings_check_hotkey(void) {
     kbd_state |= usbhid_get_kbd_state();
 #endif
     
-    if (kbd_state & KBD_STATE_ESC) {
+    if (kbd_state & KBD_STATE_MENU) {
         start_select = true;
     }
     
