@@ -6,6 +6,8 @@
 
 #include "link_session.h"
 
+uint32_t link_hs_arm_us, link_hs_xfer_us, link_hs_drop_us, link_hs_n;
+
 #include "pico/stdlib.h"
 #include "pico/time.h"
 
@@ -39,18 +41,29 @@ bool link_m_send_ctrl(link_session_t *s, uint16_t op,
     link_frame_build(s->ctrl_tx, op, ++s->seq, arg0, arg1, payload, payload_len);
 
     /* "Master ready to send." */
+    uint64_t h0 = time_us_64();
     link_db_set(s->link, true);
     if (!link_db_wait(s->link, true, hs_timeout(s))) {
         link_db_set(s->link, false);
         return false;
     }
+    uint64_t h1 = time_us_64();
 
     link_use_ctrl_rate(s->link);
     link_tx_start(s->link, s->ctrl_tx, LINK_CTRL_BYTES);
     bool ok = link_tx_finish(s->link, LINK_CTRL_TIMEOUT_US);
+    uint64_t h2 = time_us_64();
 
     link_db_set(s->link, false);
     if (!link_db_wait(s->link, false, hs_timeout(s))) return false;
+    uint64_t h3 = time_us_64();
+
+    /* Where a control send actually goes: waiting for the peer to say it
+     * is armed, our own transfer, then waiting for it to drop. */
+    link_hs_arm_us  += (uint32_t)(h1 - h0);
+    link_hs_xfer_us += (uint32_t)(h2 - h1);
+    link_hs_drop_us += (uint32_t)(h3 - h2);
+    link_hs_n++;
 
     return ok;
 }
