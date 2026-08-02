@@ -78,7 +78,7 @@ static inline void link_unlock(void) {
  * never fires: the point is to keep the slave close in *time*, and each
  * RUN_UNTIL is what lets it advance. */
 #ifndef LINK_PUSH_THRESHOLD
-#define LINK_PUSH_THRESHOLD 1u
+#define LINK_PUSH_THRESHOLD 12u
 #endif
 /* Mid-frame flush.
  *

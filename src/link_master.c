@@ -272,7 +272,11 @@ bool link_master_sync_peek(const link_event_t *events, uint32_t count,
 
     session.handshake_timeout_us = LINK_FRAME_TIMEOUT_US;
 
-    bool ok = link_m_send_ctrl(&session, LINK_OP_SYNC, count, offset, NULL, 0);
+    /* No output pointer means the caller only wants the events replayed,
+     * not a value back. Tell the slave, so it can acknowledge before it
+     * replays instead of making us wait for its Z80 to catch up. */
+    uint32_t arg1 = offset | (out ? 0u : LINK_SYNC_NO_PEEK);
+    bool ok = link_m_send_ctrl(&session, LINK_OP_SYNC, count, arg1, NULL, 0);
     if (ok && count) {
         ok = link_m_bulk_send(&session, events, count * sizeof(link_event_t));
     }

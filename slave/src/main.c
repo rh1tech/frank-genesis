@@ -368,8 +368,9 @@ static void serve_one(void) {
          * answer with the Z80 RAM byte it is about to read. Keeps the
          * 68K's view of the sound driver's replies in step with the
          * single-chip build, where the Z80 has already run this far. */
-        uint32_t count  = h->arg0;
-        uint16_t offset = (uint16_t)(h->arg1 & (LINK_ZRAM_BYTES - 1));
+        uint32_t count   = h->arg0;
+        bool     no_peek = (h->arg1 & LINK_SYNC_NO_PEEK) != 0;
+        uint16_t offset  = (uint16_t)(h->arg1 & (LINK_ZRAM_BYTES - 1));
         n_sync++;
 
         if (count > LINK_MAX_EVENTS) count = LINK_MAX_EVENTS;
@@ -378,9 +379,18 @@ static void serve_one(void) {
             n_ev_bulkfail++;
             break;
         }
-        slave_sound_chunk(events, count);
-        link_s_send_ctrl(&session, LINK_OP_SYNC_ACK,
-                         slave_zram_peek(offset), 0, NULL, 0);
+
+        if (no_peek) {
+            /* The master only wants these replayed, so let it go before
+             * doing the work: on a DAC-heavy game the replay is most of
+             * a millisecond and it was blocking the master's core 1. */
+            link_s_send_ctrl(&session, LINK_OP_SYNC_ACK, 0, 0, NULL, 0);
+            slave_sound_chunk(events, count);
+        } else {
+            slave_sound_chunk(events, count);
+            link_s_send_ctrl(&session, LINK_OP_SYNC_ACK,
+                             slave_zram_peek(offset), 0, NULL, 0);
+        }
         break;
     }
 

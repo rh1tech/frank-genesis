@@ -81,6 +81,12 @@ enum {
      * to replay them now; the ack carries the requested Z80 RAM byte as
      * of that point. arg0 = event count to follow, arg1 = byte offset.
      * Measured at ~0.3 reads per frame, so this is rare. */
+/* Set in a SYNC's arg1 when the master wants the events replayed but no
+ * value back. The slave acknowledges first and replays afterwards, so
+ * the master is not held up by the slave's Z80 catching up — which on a
+ * DAC-heavy game was 3.4 ms of every frame. */
+#define LINK_SYNC_NO_PEEK 0x00010000u
+
     LINK_OP_SYNC         = 0x0034,
     LINK_OP_SYNC_ACK     = 0x0035,  /* S->M: arg0 = the byte             */
 
