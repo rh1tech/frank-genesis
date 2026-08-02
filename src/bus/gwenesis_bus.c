@@ -75,8 +75,21 @@ unsigned char M68K_RAM[MAX_RAM_SIZE];    // 68K RAM
  ******************************************************************************/
 #define ROM_CACHE_PAGE_SIZE     4096    /* 4KB per page */
 #define ROM_CACHE_PAGE_SHIFT    12      /* log2(4096) */
-#define ROM_CACHE_NUM_PAGES     15      /* 15 pages = 60KB total */
+/* Must be a power of two: the slot index is (page_num & MASK), so with
+ * 15 pages the mask was 14, which clears bit 0 — adjacent 4 KB ROM pages
+ * then shared a slot and evicted each other, and only 8 of the 15 slots
+ * were ever used. Each eviction copies 4 KB out of PSRAM. */
+#ifndef ROM_CACHE_NUM_PAGES
+#define ROM_CACHE_NUM_PAGES     16      /* 16 pages = 64KB total */
+#endif
+#if (ROM_CACHE_NUM_PAGES & (ROM_CACHE_NUM_PAGES - 1)) != 0
+#error "ROM_CACHE_NUM_PAGES must be a power of two"
+#endif
 #define ROM_CACHE_PAGE_MASK     (ROM_CACHE_NUM_PAGES - 1)
+
+/* Hit/miss accounting: a miss copies 4 KB out of PSRAM, so the miss rate
+ * is what decides how much of a frame the 68K spends waiting on memory. */
+uint32_t rom_cache_hits, rom_cache_misses;
 
 static uint8_t __attribute__((aligned(4))) rom_page_cache[ROM_CACHE_NUM_PAGES][ROM_CACHE_PAGE_SIZE];
 static uint32_t rom_cache_tags[ROM_CACHE_NUM_PAGES];  /* Upper address bits for validation */
@@ -97,8 +110,10 @@ static inline uint8_t rom_cache_read_8(uint32_t address) {
     
     /* Check cache hit */
     if (rom_cache_valid[cache_slot] && rom_cache_tags[cache_slot] == page_num) {
+        rom_cache_hits++;
         return rom_page_cache[cache_slot][page_offset ^ 1];  /* Byte swap for big-endian */
     }
+    rom_cache_misses++;
     
     /* Cache miss - fill the page */
     uint32_t page_base = page_num << ROM_CACHE_PAGE_SHIFT;
@@ -121,8 +136,10 @@ static inline uint16_t rom_cache_read_16(uint32_t address) {
     
     /* Check cache hit */
     if (rom_cache_valid[cache_slot] && rom_cache_tags[cache_slot] == page_num) {
+        rom_cache_hits++;
         return *(uint16_t *)&rom_page_cache[cache_slot][page_offset];
     }
+    rom_cache_misses++;
     
     /* Cache miss - fill the page */
     uint32_t page_base = page_num << ROM_CACHE_PAGE_SHIFT;

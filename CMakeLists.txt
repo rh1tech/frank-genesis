@@ -326,6 +326,10 @@ endif()
 set(LINK_PIPELINE "0" CACHE STRING "Collect the slave's reply inline (0). 1 is incompatible with mid-frame sync.")
 target_compile_definitions(frank-genesis PRIVATE LINK_PIPELINE=${LINK_PIPELINE})
 
+if(DEBUG_AUTO_SETTINGS)
+    target_compile_definitions(frank-genesis PRIVATE DEBUG_AUTO_SETTINGS=${DEBUG_AUTO_SETTINGS})
+endif()
+
 if(SOUND_CAPTURE)
     target_compile_definitions(frank-genesis PRIVATE SOUND_CAPTURE=1)
 endif()

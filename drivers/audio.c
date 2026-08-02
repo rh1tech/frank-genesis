@@ -668,11 +668,17 @@ bool audio_is_enabled(void) {
 }
 
 void audio_flush_silence(void) {
-    // Send a few frames of silence to clear the DMA buffer
-    // This prevents the last audio sample from repeating
+    /* Every slot in the ring, not a fixed three.
+     *
+     * Nothing refills the queue while the settings menu is open — core 1
+     * is parked waiting for a frame that core 0 is not producing — so the
+     * DMA chain simply replays the ring. Leaving even one slot holding
+     * game audio makes that slot loop forever, which is heard as a single
+     * sustained note. Three was right for a two-deep queue and became
+     * wrong when it grew to four. */
     if (!audio_initialized) return;
-    
-    for (int frame = 0; frame < 3; frame++) {
+
+    for (int frame = 0; frame < DMA_BUFFER_COUNT + 1; frame++) {
         for (int i = 0; i < TARGET_SAMPLES_NTSC * 2; i++) {
             mixed_buffer[i] = 0;
         }

@@ -765,7 +765,18 @@ static void __time_critical_func(emulation_loop)(void) {
     
     // Wait for all buttons to be released before starting emulation
     // This prevents Start+Select held during ROM selection from triggering settings immediately
+    /* Pump the USB stack while waiting.
+     *
+     * settings_check_hotkey() refreshes the gamepad and the PS/2 keyboard
+     * itself, but the USB keyboard's state only changes when
+     * usbhid_task() runs. Without it the key-up for ESC is never
+     * processed, so the hotkey reads as held forever and this loop never
+     * ends — the menu never appears and the emulator looks hung. C2
+     * always builds with USB HID, which is why it shows up there. */
     while (settings_check_hotkey()) {
+#ifdef USB_HID_ENABLED
+        usbhid_task();
+#endif
         sleep_ms(50);
     }
     
@@ -789,15 +800,31 @@ static void __time_critical_func(emulation_loop)(void) {
 
     while (1) {
         // Check for Start+Select hotkey to open settings menu
-        if (settings_check_hotkey()) {
+        bool want_settings = settings_check_hotkey();
+#ifdef DEBUG_AUTO_SETTINGS
+        /* Reproduce the menu entry without a keyboard, so the hang can be
+         * caught under the debugger. */
+        {
+            static bool dbg_fired;
+            if (!dbg_fired && frame_counter >= (uint32_t)DEBUG_AUTO_SETTINGS) {
+                dbg_fired = true;
+                want_settings = true;
+            }
+        }
+#endif
+        if (want_settings) {
             // LOCK buttons immediately - no input will reach game until unlocked
             button_lock = true;
             button_state[0] = 0xFF;
             button_state[1] = 0xFF;
             button_state[2] = 0xFF;
             
-            // Wait for buttons to be released first
+            // Wait for buttons to be released first (see note above: the
+            // USB keyboard needs usbhid_task() pumped or ESC never lifts)
             while (settings_check_hotkey()) {
+#ifdef USB_HID_ENABLED
+                usbhid_task();
+#endif
                 sleep_ms(50);
             }
             
