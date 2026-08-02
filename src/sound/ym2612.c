@@ -2286,8 +2286,16 @@ void ym2612_run(int target) {
 /* n = number  */
 /* a = address */
 /* v = value   */
+/* What the sound driver is actually doing to the chip. A game whose FM
+ * output sits at a constant is either not being written at all, or is
+ * being written but never keyed on. */
+uint32_t ym_writes_total, ym_writes_dac, ym_writes_keyon, ym_keyon_nonzero;
+uint16_t ym_reg_hist[512];
+
 void YM2612Write(unsigned int a, unsigned int v,  int target)
 {
+    ym_writes_total++;
+
   ym_log(__FUNCTION__," %06x : %02x",a,v);
 
   /* Sync audio generation up to this point before applying the write */
@@ -2309,6 +2317,14 @@ void YM2612Write(unsigned int a, unsigned int v,  int target)
     default:  /* data port */
     {
       int addr = ym2612.OPN.ST.address; /* verified by Nemesis on real YM2612 */
+      /* Observe only; the real handling is unchanged below. */
+      if (addr < 512) ym_reg_hist[addr & 0x1FF]++;
+      if (addr == 0x28) {
+          ym_writes_keyon++;
+          if (v & 0xF0) ym_keyon_nonzero++;   /* any operator keyed on */
+      } else if (addr == 0x2a) {
+          ym_writes_dac++;
+      }
       switch( addr & 0x1f0 )
       {
         case 0x20:  /* 0x20-0x2f Mode */
@@ -2340,8 +2356,13 @@ void YM2612Write(unsigned int a, unsigned int v,  int target)
   }
 }
 
+uint32_t ym_reads_total, ym_read_last_status;
+
 unsigned int YM2612Read(int target)
 {
+  ym_reads_total++;
+  ym_read_last_status = ym2612.OPN.ST.status & 0xff;
+
   // //Sync
   if (GWENESIS_AUDIO_ACCURATE == 1)
     ym2612_run(target);

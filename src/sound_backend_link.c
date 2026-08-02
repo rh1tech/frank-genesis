@@ -139,25 +139,6 @@ static inline bool emit(uint8_t type, uint16_t addr, uint8_t val, int cycles) {
 /* Core 0 drives the link here, mid-frame. That is safe only while core 1
  * is not using it, which is exactly the window after it has finished the
  * previous frame's exchange — the same condition the mirror needed. */
-__attribute__((unused))
-static bool link_core1_idle(void) {
-    if (core0_frame == 0) return true;
-    uint32_t need = core0_frame - 1;
-    if ((int32_t)(mirror_gen - need) >= 0) return true;
-
-    uint64_t t0 = time_us_64();
-    link_mirror_waits++;
-    while ((int32_t)(mirror_gen - need) < 0) {
-        if (time_us_64() - t0 > 20000) {      /* slave gone: do not hang */
-            link_mirror_timeouts++;
-            link_mirror_wait_us += (uint32_t)(time_us_64() - t0);
-            return false;
-        }
-        tight_loop_contents();
-    }
-    link_mirror_wait_us += (uint32_t)(time_us_64() - t0);
-    return true;
-}
 
 /* Core 1: give the slave whatever has piled up, so it keeps pace with
  * the master's frame instead of catching up in one lump later. */
@@ -813,19 +794,9 @@ bool sound_link_exchange(void) {
      * slave has had a whole frame of master emulation to produce it, so
      * this normally returns immediately instead of blocking core 1 for
      * the slave's compute. */
-    bool ok = true;
-    if (frame_in_flight) {
-        ok = link_master_frame_collect(link_ym_samples_buf, link_sn_samples_buf,
-                                       (uint32_t *)&link_ym_sample_count,
-                                       (uint32_t *)&link_sn_sample_count,
-                                       zram_merge);
-        frame_in_flight = false;
-        if (ok) { __dmb(); mirror_gen = inflight_frame_no; }
-    } else {
-        link_ym_sample_count = 0;
-        link_sn_sample_count = 0;
-        ok = false;              /* first frame: nothing to play yet */
-    }
+    bool ok = false;
+    link_ym_sample_count = 0;
+    link_sn_sample_count = 0;
 
     if (link_master_connected() &&
         link_master_frame_send(&events[buf][pending_sent],
@@ -835,9 +806,10 @@ bool sound_link_exchange(void) {
         inflight_frame_no = pending_frame_no;
     }
 
-#if !LINK_PIPELINE
-    /* Collect immediately: the mirror then reflects the frame just sent
-     * rather than the one before it. Costs the slave's compute inline. */
+    /* Collect the reply before releasing the link. Deferring it to the
+     * next frame was tried and cannot work: a 68K read of Z80 RAM
+     * synchronises from core 0, and core 1 holding a half-finished
+     * exchange across the frame boundary makes that read time out. */
     if (frame_in_flight) {
         ok = link_master_frame_collect(link_ym_samples_buf, link_sn_samples_buf,
                                        (uint32_t *)&link_ym_sample_count,
@@ -846,7 +818,6 @@ bool sound_link_exchange(void) {
         frame_in_flight = false;
         if (ok) { __dmb(); mirror_gen = inflight_frame_no; }
     }
-#endif
 
     link_unlock();
 

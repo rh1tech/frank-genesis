@@ -133,6 +133,8 @@ uint32_t z80_cycles_req, z80_cycles_exec, z80_run_calls;
 #define Z80_COUNT(x) do { } while (0)
 #endif
 
+volatile uint32_t z80_live[4];
+
 void z80_run(int target) {
     Z80_COUNT(z80_run_calls++);
 
@@ -188,6 +190,13 @@ void z80_run(int target) {
   }
 
   Z80_COUNT(z80_cycles_exec -= (uint32_t)rem);
+  /* Live snapshot for diagnosis: where the driver is, and whether it can
+   * take the 60 Hz interrupt an SMPS driver ticks on. */
+  z80_live[0] = cpu.PC.W;
+  z80_live[1] = cpu.IFF;
+  z80_live[2] = (uint32_t)cpu.IRequest;
+  z80_live[3] = (uint32_t)(bus_ack | (reset << 1) | (reset_once << 2));
+
   zclk = target - rem * Z80_FREQ_DIVISOR;
 }
 
@@ -238,8 +247,14 @@ void z80_set_memory(unsigned char *buffer)
     initialized = 1;
 }
 
+uint32_t z80_ctrl_busreq, z80_ctrl_busrel, z80_ctrl_reset_assert, z80_ctrl_reset_release;
+
 void z80_write_ctrl(unsigned int address, unsigned int value) {
   z80_sync();
+
+  if (address == 0x1100) { if (value) z80_ctrl_busreq++; else z80_ctrl_busrel++; }
+  else if (address == 0x1200) { if (value == 0) z80_ctrl_reset_assert++; else z80_ctrl_reset_release++; }
+
 
   if (address == 0x1100) // BUSREQ
   {
@@ -255,12 +270,24 @@ void z80_write_ctrl(unsigned int address, unsigned int value) {
 
   } else if (address == 0x1200) // RESET
   {
+    /* The Z80 is held in reset while this line is low and starts from its
+     * reset state when it goes high. Only the low->high edge restarts it.
+     *
+     * Pulsing on every write instead meant a game that keeps writing 1 —
+     * which is normal, it is part of the usual sound handshake — restarted
+     * the Z80 continuously. Measured on Ultimate Mortal Kombat 3: 1656
+     * writes in 15 seconds, so the sound driver was reset 110 times a
+     * second and never ran long enough to play anything. Its YM traffic
+     * was 985 writes and 116 DAC writes in 20 s against Comix Zone's
+     * 375884 and 88684. */
     if (value == 0) {
       reset = 1;
     } else {
-      z80_pulse_reset();
+      if (reset) {
+        z80_pulse_reset();
+        reset_once = 1;
+      }
       reset = 0;
-      reset_once = 1;
     }
   }
 }

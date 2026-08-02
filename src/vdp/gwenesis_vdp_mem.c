@@ -171,10 +171,16 @@ static void vdp_palette_split(uint8_t addr, uint16_t value)
     graphics_set_palette(slot, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
 }
 
-/* Route a CRAM write either to the base palette or to a spare. */
+/* Route a CRAM write either to the base palette or to a spare.
+ *
+ * Not while the CRT effect is on: that reaches the dim copies by ORing
+ * 64 into the index at scanout, which lands on top of the spares at 128
+ * and up (128|64 = 192). The two cannot share the palette, so the
+ * scanline effect gives way to the one the user asked for. */
 static inline void vdp_cram_apply(uint8_t addr, uint16_t value)
 {
-    if (vdp_palette_split_enabled && vdp_mid_frame())
+    if (vdp_palette_split_enabled && !graphics_get_crt_enabled() &&
+        vdp_mid_frame())
         vdp_palette_split(addr, value);
     else
         graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));

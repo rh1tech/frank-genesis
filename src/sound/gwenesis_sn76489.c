@@ -301,8 +301,11 @@ if ( sn76489_clock >= target) return;
     sn76489_index = sn76489_prev_index;
   }
 }
+uint32_t psg_writes_total;
+
 void gwenesis_SN76489_Write(int data, int target)
 {
+    psg_writes_total++;
   if (GWENESIS_AUDIO_ACCURATE == 1)
     gwenesis_SN76489_run(target);
 

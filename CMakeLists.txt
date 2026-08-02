@@ -323,8 +323,6 @@ endif()
 # ends the frame — so the read times out instead of getting a fresh byte.
 # Collecting inline costs nothing measurable: the frame rate is pinned by
 # audio pacing either way (59.8 fps against 60.5 with sound run locally).
-set(LINK_PIPELINE "0" CACHE STRING "Collect the slave's reply inline (0). 1 is incompatible with mid-frame sync.")
-target_compile_definitions(frank-genesis PRIVATE LINK_PIPELINE=${LINK_PIPELINE})
 
 set(VDP_RASTER_RENDER "1" CACHE STRING "Draw each line as the beam reaches it (1) instead of the whole frame afterwards (0)")
 target_compile_definitions(frank-genesis PRIVATE VDP_RASTER_RENDER=${VDP_RASTER_RENDER})

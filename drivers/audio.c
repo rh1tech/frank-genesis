@@ -52,7 +52,9 @@
  * seven seconds, and each miss makes the chain replay a stale buffer,
  * which is plainly audible. Four buffers doubles the margin for 8 KB of
  * RAM and one extra frame of latency. */
+#ifndef DMA_BUFFER_COUNT
 #define DMA_BUFFER_COUNT 4
+#endif
 // One DMA word is one stereo frame (packed L/R int16).
 // AUDIO_BUFFER_SAMPLES is sized to cover NTSC/PAL with headroom.
 #define DMA_BUFFER_MAX_SAMPLES AUDIO_BUFFER_SAMPLES
