@@ -253,6 +253,11 @@ void i2s_init(i2s_config_t *config) {
 #endif
 }
 
+/* Optional callback run while blocked waiting for a DMA slot. The wait is
+ * most of a frame on the core that feeds audio, and that core may have
+ * other work queued for it; without this it simply spins. */
+void (*i2s_wait_hook)(void) = NULL;
+
 void i2s_dma_write_count(i2s_config_t *config, const int16_t *samples, uint32_t sample_count) {
     if (sample_count > dma_transfer_count) sample_count = dma_transfer_count;
     if (sample_count == 0) sample_count = 1;
@@ -284,6 +289,8 @@ void i2s_dma_write_count(i2s_config_t *config, const int16_t *samples, uint32_t 
         }
 
         restore_interrupts(irq_state);
+
+        if (i2s_wait_hook) i2s_wait_hook();
 
         if (time_reached(wait_deadline)) {
             /* Stalled. Rebuild the ping-pong from a known state and

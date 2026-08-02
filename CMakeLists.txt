@@ -326,6 +326,13 @@ endif()
 set(LINK_PIPELINE "0" CACHE STRING "Collect the slave's reply inline (0). 1 is incompatible with mid-frame sync.")
 target_compile_definitions(frank-genesis PRIVATE LINK_PIPELINE=${LINK_PIPELINE})
 
+set(VDP_SPLIT_RENDER "1" CACHE STRING "Render frame lines across both cores (1) or core 0 only (0)")
+target_compile_definitions(frank-genesis PRIVATE VDP_SPLIT_RENDER=${VDP_SPLIT_RENDER})
+
+if(SCREEN_VERIFY)
+    target_compile_definitions(frank-genesis PRIVATE SCREEN_VERIFY=1)
+endif()
+
 if(DEBUG_AUTO_SETTINGS)
     target_compile_definitions(frank-genesis PRIVATE DEBUG_AUTO_SETTINGS=${DEBUG_AUTO_SETTINGS})
 endif()

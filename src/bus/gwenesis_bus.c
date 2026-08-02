@@ -80,7 +80,13 @@ unsigned char M68K_RAM[MAX_RAM_SIZE];    // 68K RAM
  * then shared a slot and evicted each other, and only 8 of the 15 slots
  * were ever used. Each eviction copies 4 KB out of PSRAM. */
 #ifndef ROM_CACHE_NUM_PAGES
-#define ROM_CACHE_NUM_PAGES     16      /* 16 pages = 64KB total */
+/* 8 pages = 32 KB. The broken mask meant only 8 slots were ever
+ * reachable, so this is no smaller than what actually shipped, is
+ * indexed correctly, and returns 32 KB of SRAM. It measured zero hits
+ * and zero misses on Comix Zone — the 68K reaches ROM through the inline
+ * FETCH macros — so it is worth removing outright once another game
+ * confirms this path is genuinely unused. */
+#define ROM_CACHE_NUM_PAGES     8
 #endif
 #if (ROM_CACHE_NUM_PAGES & (ROM_CACHE_NUM_PAGES - 1)) != 0
 #error "ROM_CACHE_NUM_PAGES must be a power of two"

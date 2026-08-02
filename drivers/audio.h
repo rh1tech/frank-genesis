@@ -91,4 +91,7 @@ void audio_debug_buffer_values(void);
 // Get the I2S config for direct access (for Core 1 loop)
 i2s_config_t* audio_get_i2s_config(void);
 
+/* Run while i2s_dma_write_count() blocks waiting for a free DMA slot. */
+extern void (*i2s_wait_hook)(void);
+
 #endif // AUDIO_H

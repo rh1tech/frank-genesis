@@ -73,8 +73,19 @@ static uint8_t* screen_buffer_line = 0;
 // so 32 pixels (on both side) is enough.
 
 #define PIX_OVERFLOW (32)
-static uint8_t render_buffer[GWENESIS_SCREEN_WIDTH + PIX_OVERFLOW * 2];
-static uint8_t sprite_buffer[GWENESIS_SCREEN_WIDTH + PIX_OVERFLOW * 2];
+
+/* Per-core line scratch.
+ *
+ * Both cores render lines of the same frame in parallel (main.c splits
+ * the line range), and these hold one line's work in progress, so they
+ * cannot be shared. Everything else the renderer touches is either
+ * read-only for the duration of a frame (VRAM, CRAM, VSRAM, registers,
+ * and the plane geometry computed by gwenesis_vdp_render_config) or is
+ * written with the same value by both cores. */
+static uint8_t render_buffer_core[2][GWENESIS_SCREEN_WIDTH + PIX_OVERFLOW * 2];
+static uint8_t sprite_buffer_core[2][GWENESIS_SCREEN_WIDTH + PIX_OVERFLOW * 2];
+#define render_buffer (render_buffer_core[get_core_num()])
+#define sprite_buffer (sprite_buffer_core[get_core_num()])
 
 // Define VIDEO MODE
 static int mode_h40;
@@ -141,7 +152,7 @@ void gwenesis_vdp_set_buffer(uint8_t* ptr_screen_buffer) {
 }
 
 void gwenesis_vdp_get_buffer(uint16_t** ptr_screen_buffer) {
-    *ptr_screen_buffer = (uint16_t *)&render_buffer[PIX_OVERFLOW];
+    *ptr_screen_buffer = (uint16_t *)&render_buffer_core[0][PIX_OVERFLOW];
     //screen_buffer = ptr_screen_buffer;
 }
 

@@ -659,12 +659,15 @@ static void setup_genesis_palette(void) {
 // Sound processing on Core 1 (I2S output only)
 // With GWENESIS_AUDIO_ACCURATE=1, sound chips are run during M68K/Z80 emulation
 // Core 1 just submits the already-generated samples to I2S DMA
+void vdp_render_worker_poll(void);   /* defined with the emulation loop */
+
 static void __scratch_x("sound") sound_core(void) {
     // Allow core 0 to pause this core during flash operations
     multicore_lockout_victim_init();
     
     // Initialize audio on Core 1
     audio_init();
+    i2s_wait_hook = vdp_render_worker_poll;   /* draw while waiting on DMA */
     
     // CRITICAL: Warmup period - wait for I2S/DMA to stabilize
     // Don't call audio_submit() - just wait
@@ -677,8 +680,10 @@ static void __scratch_x("sound") sound_core(void) {
     
     // Core 1 loop - synchronized with Core 0 emulation
     while (1) {
-        // Wait for Core 0 to complete a frame
+        // Wait for Core 0 to complete a frame, drawing its half of the
+        // current frame's lines while that wait would otherwise be idle.
         while (!frame_ready) {
+            vdp_render_worker_poll();
             tight_loop_contents();
         }
         frame_ready = false;
@@ -750,6 +755,68 @@ static void __scratch_x("sound") sound_core(void) {
         // Signal Core 0 that audio is done
         audio_done = true;
     }
+}
+
+/* Parallel line rendering.
+ *
+ * Core 1 sits idle in its frame wait for the whole of PHASE 2 — it has
+ * nothing to do until core 0 hands it a finished frame — while core 0
+ * spends ~3.9 ms of a 16.3 ms frame drawing lines. Rendering is safe to
+ * split: emulation has already finished, so VRAM, CRAM, VSRAM and the
+ * registers are stable, and the only per-line state (the two scratch
+ * buffers in the VDP) is now per-core.
+ *
+ * Core 0 draws line 0 itself first: that is where
+ * gwenesis_vdp_render_line() computes the plane geometry the rest of the
+ * frame reads, so it has to be done before core 1 starts. */
+#ifndef VDP_SPLIT_RENDER
+#define VDP_SPLIT_RENDER 1
+#endif
+
+#ifdef SCREEN_VERIFY
+/* Running hash of every rendered frame, sampled at fixed frame counts.
+ * Splitting the lines across two cores must produce exactly the same
+ * pixels as rendering them all on one, and this is what proves it. */
+uint32_t screen_hash_run;
+uint32_t screen_hash_ckpt[6];
+static const uint32_t screen_hash_at[6] = { 128, 256, 512, 1024, 1536, 2048 };
+static uint32_t screen_hash_count;
+
+static void screen_verify_frame(void) {
+    uint32_t h = 2166136261u;
+    for (int y = 0; y < screen_height; y++) {
+        const uint8_t *row = (const uint8_t *)SCREEN[y];
+        for (int x = 0; x < screen_width; x++) { h ^= row[x]; h *= 16777619u; }
+    }
+    screen_hash_run ^= h; screen_hash_run *= 16777619u;
+    for (int i = 0; i < 6; i++)
+        if (screen_hash_count == screen_hash_at[i]) screen_hash_ckpt[i] = screen_hash_run;
+    screen_hash_count++;
+}
+#endif
+
+volatile int  vdp_job_from, vdp_job_to, vdp_job_step;
+volatile bool vdp_job_done;
+/* Claimed with an atomic exchange so exactly one core runs the job. Core
+ * 1 takes it when it can, but it spends most of a frame blocked feeding
+ * I2S, so core 0 reclaims it rather than stalling: worst case we are back
+ * to rendering everything on core 0, never slower. */
+volatile int  vdp_job_claim;
+
+static inline void vdp_render_range(int from, int to, int step) {
+    for (int line = from; line < to; line += step) gwenesis_vdp_render_line(line);
+}
+
+/* Called from core 1's idle wait. */
+static bool vdp_job_take(void) {
+    return __atomic_exchange_n(&vdp_job_claim, 0, __ATOMIC_ACQUIRE) == 1;
+}
+
+void vdp_render_worker_poll(void) {
+    if (!vdp_job_take()) return;
+    vdp_render_range(vdp_job_from, vdp_job_to, vdp_job_step);
+    __dmb();
+    vdp_job_done = true;
 }
 
 // Main emulation loop
@@ -1144,17 +1211,47 @@ static void __time_critical_func(emulation_loop)(void) {
             // Line interlacing: render every other line, then duplicate
             // Alternates between even and odd lines each frame for better quality
             int start_line = (frame_counter & 1);  // 0 or 1
-            for (int line = start_line; line < screen_height; line += 2) {
-                gwenesis_vdp_render_line(line);
+            gwenesis_vdp_render_line(start_line);          /* geometry first */
+            {
+                int rest = start_line + 2;
+                int mid  = rest + (((screen_height - rest) / 2) & ~1);
+                vdp_job_from = mid; vdp_job_to = screen_height; vdp_job_step = 2;
+                __atomic_store_n(&vdp_job_claim, 1, __ATOMIC_RELEASE);
+                vdp_render_range(rest, mid, 2);
+                if (vdp_job_take()) {          /* core 1 never got to it */
+                    vdp_render_range(vdp_job_from, vdp_job_to, vdp_job_step);
+                    __dmb(); vdp_job_done = true;
+                }
+                while (!vdp_job_done) tight_loop_contents();
+                vdp_job_done = false; __dmb();
             }
             // Duplicate rendered lines to adjacent lines (using SCREEN buffer)
             for (int line = start_line; line < screen_height - 1; line += 2) {
                 memcpy(SCREEN[line + 1], SCREEN[line], screen_width);
             }
 #else
+#if VDP_SPLIT_RENDER
+            gwenesis_vdp_render_line(0);                   /* geometry first */
+            {
+                int mid = 1 + (screen_height - 1) / 2;
+                vdp_job_from = mid; vdp_job_to = screen_height; vdp_job_step = 1;
+                __atomic_store_n(&vdp_job_claim, 1, __ATOMIC_RELEASE);
+                vdp_render_range(1, mid, 1);
+                if (vdp_job_take()) {          /* core 1 never got to it */
+                    vdp_render_range(vdp_job_from, vdp_job_to, vdp_job_step);
+                    __dmb(); vdp_job_done = true;
+                }
+                while (!vdp_job_done) tight_loop_contents();
+                vdp_job_done = false; __dmb();
+            }
+#else
             for (int line = 0; line < screen_height; line++) {
                 gwenesis_vdp_render_line(line);
             }
+#endif
+#endif
+#ifdef SCREEN_VERIFY
+            screen_verify_frame();
 #endif
             uint32_t render_us = (uint32_t)(time_us_64() - render_start_us);
             PROFILE_END(vdp_time);
