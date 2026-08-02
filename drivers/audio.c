@@ -383,7 +383,10 @@ void i2s_decrease_volume(i2s_config_t *config) {
 
 static bool audio_initialized = false;
 static bool audio_enabled = true;
-static int master_volume = 100;  // 0-128
+/* Unity. It was 100/128, a 22% attenuation that made the DAC voices
+ * quiet; with the limiter above actually in use the headroom it was
+ * buying is no longer needed. */
+static int master_volume = 128;  // 0-128
 static i2s_config_t i2s_config;
 
 // External audio control flags from main.c
@@ -617,9 +620,12 @@ void audio_submit(void) {
         if (ym2612_enabled && i < ym_samples) mixed += ym_buffer[i];
         if (sn76489_enabled && i < sn_samples) mixed += sn_buffer[i];
         mixed = (mixed * master_volume) >> 7;
-        if (mixed > 32767) mixed = 32767;
-        if (mixed < -32768) mixed = -32768;
-        premix_buffer[i] = (int16_t)mixed;
+        /* Compress the peaks instead of shearing them off. soft_limit()
+         * was defined here but never called, so anything the two chips
+         * summed past full scale came out as hard clipping — audible on
+         * the digital voices in Ultimate Mortal Kombat 3, which peak well
+         * above the FM behind them. */
+        premix_buffer[i] = soft_limit(mixed);
     }
     
     // PHASE 2: Time-stretch to 888 samples using nearest-neighbor (FAST)
