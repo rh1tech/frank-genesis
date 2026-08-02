@@ -78,6 +78,9 @@ __license__ = "GPLv3"
 #define CRAM_MAX_SIZE 0x40       // CRAM maximum size
 #define VSRAM_MAX_SIZE 0x40      // VSRAM maximum size
 #define SAT_CACHE_MAX_SIZE 0x400 // SAT CACHE maximum size
+
+/* Invalidate the renderer's per-line sprite lists after a SAT write. */
+void gwenesis_vdp_sprite_cache_dirty(void);
 #define REG_SIZE 0x20            // REGISTERS total
 #define FIFO_SIZE 0x4            // FIFO maximum size
 

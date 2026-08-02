@@ -87,6 +87,7 @@ static uint8_t sprite_buffer_core[2][GWENESIS_SCREEN_WIDTH + PIX_OVERFLOW * 2];
 #define render_buffer (render_buffer_core[get_core_num()])
 #define sprite_buffer (sprite_buffer_core[get_core_num()])
 
+
 // Define VIDEO MODE
 static int mode_h40;
 int mode_pal;
@@ -99,6 +100,82 @@ int gwenesis_H32upscaler;
 
 int sprite_overflow;
 bool sprite_collision;
+
+/* Per-line sprite lists.
+ *
+ * draw_sprites_over_planes() used to walk the whole sprite link list --
+ * up to 80 entries -- for every one of the 224 lines, and throw nearly
+ * all of it away: the entire body sits inside the "does this sprite cover
+ * this line" test, so a rejected sprite costs a handful of loads and
+ * changes no state. That is ~17,900 iterations a frame to draw a few
+ * hundred sprite rows, and it is why Ultimate Mortal Kombat 3 -- which is
+ * mostly large sprites -- spends 2.3x as long rendering as Comix Zone
+ * (5.3 ms a frame against 2.3 ms) despite an identical 68K budget.
+ *
+ * Walking the list once and bucketing each sprite into the lines it
+ * covers gives every line exactly the sprites it needs, still in link
+ * order, which is what the masking and pixel-overflow rules depend on.
+ *
+ * This is a memoization, not a frame snapshot: the table can be rewritten
+ * mid-frame (Castlevania Bloodlines does), so any write touching the SAT
+ * invalidates it and the next line rebuilds. Per core, because both cores
+ * render lines of the same frame concurrently.
+ *
+ * Sprite X, pattern name and flip are still read live from VRAM at draw
+ * time, and Y/size/link still come from SAT_CACHE, exactly as before --
+ * so mid-frame rewrites land the same way they always did. */
+#define SPR_MAX_LINES     240
+#define SPR_MAX_PER_LINE  20
+static uint8_t  spr_line_idx_core[2][SPR_MAX_LINES][SPR_MAX_PER_LINE];
+static uint8_t  spr_line_cnt_core[2][SPR_MAX_LINES];
+static bool     spr_lists_dirty[2] = { true, true };
+static uint32_t spr_lists_sat[2];
+static int      spr_lists_width[2];
+
+/* Called from the VRAM write path whenever a byte of the sprite
+ * attribute table changes. */
+void gwenesis_vdp_sprite_cache_dirty(void) {
+    spr_lists_dirty[0] = true;
+    spr_lists_dirty[1] = true;
+}
+
+static void spr_build_lists(int core) {
+    const int SPRITE_TABLE_SIZE    = (screen_width == 320) ? 80 : 64;
+    const int MAX_SPRITES_PER_LINE = (screen_width == 320) ? 20 : 16;
+    int h = screen_height;
+    if (h > SPR_MAX_LINES) h = SPR_MAX_LINES;
+
+    memset(spr_line_cnt_core[core], 0, SPR_MAX_LINES);
+
+    int sidx = 0;
+    for (int i = 0; (i < SPRITE_TABLE_SIZE) && sidx < SPRITE_TABLE_SIZE; ++i) {
+        uint8_t *cache = SAT_CACHE + __fast_mul(sidx, 8);
+        int sy   = (((cache[0] & 0x3) << 8) | cache[1]) - 128;
+        int sh   = BITS(cache[2], 0, 2) + 1;
+        int link = BITS(cache[3], 0, 7);
+
+        int y0 = sy, y1 = sy + __fast_mul(sh, 8);
+        if (y0 < 0) y0 = 0;
+        if (y1 > h) y1 = h;
+        for (int l = y0; l < y1; l++) {
+            uint8_t n = spr_line_cnt_core[core][l];
+            /* The old loop stopped after MAX_SPRITES_PER_LINE sprites on a
+             * line, so anything past that was never drawn either. */
+            if (n < MAX_SPRITES_PER_LINE) {
+                spr_line_idx_core[core][l][n] = (uint8_t)sidx;
+                spr_line_cnt_core[core][l]    = n + 1;
+            }
+        }
+
+        if (link == 0) break;
+        sidx = link;
+    }
+
+    spr_lists_dirty[core] = false;
+    spr_lists_sat[core]   = REG5_SAT_ADDRESS;
+    spr_lists_width[core] = screen_width;
+}
+
 
 // Window Plane and A plane spearation
 static int base_w;
@@ -730,36 +807,33 @@ static inline __attribute__((always_inline))
 void draw_sprites_over_planes(int line) {
     uint8_t* scr = &render_buffer[PIX_OVERFLOW];
 
-    //    scr = screen_buffer_line;
-
-    // uint8_t mask = mode_h40 ? 0x7E : 0x7F;
-    // uint8_t *start_table = VRAM + ((gwenesis_vdp_regs[5] & mask) << 9);
-
     uint8_t* start_table = VRAM + REG5_SAT_ADDRESS;
 
-    // This is both the size of the table as seen by the VDP
-    // *and* the maximum number of sprites that are processed
-    // (important in case of infinite loops in links).
-    const int SPRITE_TABLE_SIZE = (screen_width == 320) ? 80 : 64;
     const int MAX_SPRITES_PER_LINE = (screen_width == 320) ? 20 : 16;
     const int MAX_PIXELS_PER_LINE = (screen_width == 320) ? 320 : 256;
 
-    bool masking = false, one_sprite_nonzero = false; // overdraw = false;
-    int sidx = 0, num_sprites = 0, num_pixels = 0;
+    int core = get_core_num();
+    if (spr_lists_dirty[core] ||
+        spr_lists_sat[core] != (uint32_t)REG5_SAT_ADDRESS ||
+        spr_lists_width[core] != screen_width)
+        spr_build_lists(core);
 
-    for (int i = 0; (i < SPRITE_TABLE_SIZE) && sidx < (SPRITE_TABLE_SIZE); ++i) {
+    if (line < 0 || line >= SPR_MAX_LINES) return;
+
+    bool masking = false, one_sprite_nonzero = false;
+    int num_sprites = 0, num_pixels = 0;
+
+    int listed = spr_line_cnt_core[core][line];
+    for (int k = 0; k < listed; ++k) {
+        int sidx = spr_line_idx_core[core][line][k];
         uint8_t* table = start_table + __fast_mul(sidx, 8);
         uint8_t* cache = SAT_CACHE + __fast_mul(sidx, 8);
-        //uint8_t *cache = start_table + sidx*8;
-
 
         int sy = ((cache[0] & 0x3) << 8) | cache[1];
         int sx = ((table[6] & 0x3) << 8) | table[7];
         uint16_t name = (table[4] << 8) | table[5];
 
-
         int sh = BITS(cache[2], 0, 2) + 1;
-        int link = BITS(cache[3], 0, 7);
 
         int isflipv = table[4] & 0x10;
         int isfliph = table[4] & 0x8;
@@ -767,65 +841,61 @@ void draw_sprites_over_planes(int line) {
         int sw = BITS(table[2], 2, 2) + 1;
 
         sy -= 128;
-        if ((line >= sy) && (line < sy + __fast_mul(sh, 8))) {
-            // Sprite masking: a sprite on column 0 masks
-            // any lower-priority sprite, but with the following conditions
-            //   * it only works from the second visible sprite on each line
-            //   * if the previous line had a sprite pixel overflow, it
-            //     works even on the first sprite
-            // Notice that we need to continue parsing the table after masking
-            // to see if we reach a pixel overflow (because it would affect masking
-            // on next line).
-            if (sx == 0) {
-                if (one_sprite_nonzero || (sprite_overflow == line - 1))
-                    masking = true;
-            }
-            else
-                one_sprite_nonzero = true;
+        /* True by construction; kept so a stale list can only ever draw
+         * less, never garbage. */
+        if (!((line >= sy) && (line < sy + __fast_mul(sh, 8)))) continue;
 
-            int row = (line - sy) >> 3;
-            int paty = (line - sy) & 7;
-            if (isflipv)
-                row = sh - row - 1;
-
-            sx -= 128;
-            if ((sx > (__fast_mul(-sw, 8))) && (sx < screen_width) && !masking) {
-                name += row;
-
-                if (isfliph) {
-                    name += sh * (sw - 1);
-
-                    for (int p = 0; (p < sw) && (num_pixels < MAX_PIXELS_PER_LINE); p++) {
-                        draw_pattern_sprite_over_planes(scr + sx + __fast_mul(p, 8), name, paty);
-                        name -= sh;
-                        num_pixels += 8;
-                    }
-                }
-                else {
-                    for (int p = 0; (p < sw) && (num_pixels < MAX_PIXELS_PER_LINE); p++) {
-                        draw_pattern_sprite_over_planes(scr + sx + __fast_mul(p, 8), name, paty);
-                        name += sh;
-                        num_pixels += 8;
-                    }
-                }
-            }
-            else
-                num_pixels += sw * 8;
-
-            if (num_pixels >= MAX_PIXELS_PER_LINE) {
-                sprite_overflow = line;
-                break;
-            }
-            if (++num_sprites >= MAX_SPRITES_PER_LINE)
-                break;
+        // Sprite masking: a sprite on column 0 masks
+        // any lower-priority sprite, but with the following conditions
+        //   * it only works from the second visible sprite on each line
+        //   * if the previous line had a sprite pixel overflow, it
+        //     works even on the first sprite
+        // Notice that we need to continue parsing the table after masking
+        // to see if we reach a pixel overflow (because it would affect masking
+        // on next line).
+        if (sx == 0) {
+            if (one_sprite_nonzero || (sprite_overflow == line - 1))
+                masking = true;
         }
+        else
+            one_sprite_nonzero = true;
 
-        if (link == 0) break;
-        sidx = link;
+        int row = (line - sy) >> 3;
+        int paty = (line - sy) & 7;
+        if (isflipv)
+            row = sh - row - 1;
+
+        sx -= 128;
+        if ((sx > (__fast_mul(-sw, 8))) && (sx < screen_width) && !masking) {
+            name += row;
+
+            if (isfliph) {
+                name += sh * (sw - 1);
+
+                for (int p = 0; (p < sw) && (num_pixels < MAX_PIXELS_PER_LINE); p++) {
+                    draw_pattern_sprite_over_planes(scr + sx + __fast_mul(p, 8), name, paty);
+                    name -= sh;
+                    num_pixels += 8;
+                }
+            }
+            else {
+                for (int p = 0; (p < sw) && (num_pixels < MAX_PIXELS_PER_LINE); p++) {
+                    draw_pattern_sprite_over_planes(scr + sx + __fast_mul(p, 8), name, paty);
+                    name += sh;
+                    num_pixels += 8;
+                }
+            }
+        }
+        else
+            num_pixels += sw * 8;
+
+        if (num_pixels >= MAX_PIXELS_PER_LINE) {
+            sprite_overflow = line;
+            break;
+        }
+        if (++num_sprites >= MAX_SPRITES_PER_LINE)
+            break;
     }
-
-    //  if (overdraw)
-    //      sprite_collision = true;
 }
 
 static inline __attribute__((always_inline))

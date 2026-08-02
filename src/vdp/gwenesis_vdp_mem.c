@@ -481,8 +481,10 @@ void __not_in_flash_func(gwenesis_vdp_vram_write)(unsigned int address, unsigned
 
     // Update internal SAT Cache
     // used in Castlevania Bloodlines
-    if (address >= REG5_SAT_ADDRESS && address < REG5_SAT_ADDRESS + REG5_SAT_SIZE)
+    if (address >= REG5_SAT_ADDRESS && address < REG5_SAT_ADDRESS + REG5_SAT_SIZE) {
         SAT_CACHE[address - REG5_SAT_ADDRESS] = value;
+        gwenesis_vdp_sprite_cache_dirty();   /* per-line sprite lists are stale */
+    }
 }
 
 static inline __attribute__((always_inline))
