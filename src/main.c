@@ -837,7 +837,35 @@ static bool vdp_job_take(void) {
  * The renderer therefore sees VDP state one line ahead of the beam
  * rather than a whole frame ahead — enough for the mid-frame VRAM
  * rewrites these effects depend on. */
+/* One line in flight: core 1 draws line N while core 0 emulates line
+ * N+1. When core 1 is busy elsewhere (it also feeds I2S and runs the
+ * link) core 0 reclaims the line and draws it itself, which is exactly
+ * the single-core behaviour.
+ *
+ * A two-deep queue was tried and changed nothing (core 0's stall stayed
+ * at 3.04 ms/frame), which says core 1 is throughput-limited rather than
+ * jittery -- so the extra line of render lag bought nothing.
+ *
+ * The renderer therefore sees VDP state one line ahead of the beam
+ * rather than a whole frame ahead -- enough for the mid-frame VRAM
+ * rewrites these effects depend on. */
 volatile bool vdp_job_busy;
+
+/* Who actually draws each line, and what core 0 pays for it. Off by
+ * default: two timer reads per line is ~45 us a frame, which is not
+ * something to pay just to keep a counter warm. Turn on to re-measure
+ * the split between the cores. */
+#ifndef VDP_PIPE_PROFILE
+#define VDP_PIPE_PROFILE 0
+#endif
+#if VDP_PIPE_PROFILE
+uint32_t vdp_lines_core0, vdp_lines_core1, vdp_draw_us, vdp_wait_us;
+#define VDP_PIPE_T0()      uint32_t t0 = (uint32_t)time_us_64()
+#define VDP_PIPE_ADD(a, c) do { (a) += (uint32_t)time_us_64() - t0; (c)++; } while (0)
+#else
+#define VDP_PIPE_T0()      do {} while (0)
+#define VDP_PIPE_ADD(a, c) do {} while (0)
+#endif
 
 void vdp_render_worker_poll(void) {
     if (!vdp_job_take()) { sound_link_push(); return; }
@@ -848,10 +876,13 @@ void vdp_render_worker_poll(void) {
 
 static void vdp_pipeline_sync(void) {
     if (!vdp_job_busy) return;
+    VDP_PIPE_T0();
     if (vdp_job_take()) {
         gwenesis_vdp_render_line(vdp_job_line);   /* core 1 never took it */
+        VDP_PIPE_ADD(vdp_draw_us, vdp_lines_core0);
     } else {
         while (!vdp_job_done) tight_loop_contents();
+        VDP_PIPE_ADD(vdp_wait_us, vdp_lines_core1);
     }
     vdp_job_done = false;
     vdp_job_busy = false;
