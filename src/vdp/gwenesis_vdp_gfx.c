@@ -477,6 +477,13 @@ void draw_pattern_sprite(uint8_t* scr, uint16_t name, int paty) {
     else
         pattern = *(unsigned int *)(VRAM + ((name & 0x07FF) << 5) + __fast_mul(paty, 4));
 
+    /* A pattern row of all-zero nibbles is eight transparent pixels, and
+     * every store below is guarded on the pixel being non-zero -- so this
+     * row would write nothing at all. Sprites are mostly empty space
+     * inside their bounding box, so this is the common case, not a rare
+     * one. */
+    if (pattern == 0) return;
+
 #if USE_ASM_VDP
     // Use assembly for pattern drawing
     if (name & 0x0800)
@@ -503,6 +510,13 @@ void draw_pattern_sprite_over_planes(uint8_t* scr, uint16_t name, int paty) {
         pattern = *(unsigned int *)(VRAM + ((name & 0x07FF) << 5) + __fast_mul((7 - paty), 4));
     else
         pattern = *(unsigned int *)(VRAM + ((name & 0x07FF) << 5) + __fast_mul(paty, 4));
+
+    /* A pattern row of all-zero nibbles is eight transparent pixels, and
+     * every store below is guarded on the pixel being non-zero -- so this
+     * row would write nothing at all. Sprites are mostly empty space
+     * inside their bounding box, so this is the common case, not a rare
+     * one. */
+    if (pattern == 0) return;
 
 #if USE_ASM_VDP
     // Use assembly for pattern drawing
@@ -873,14 +887,22 @@ void draw_sprites_over_planes(int line) {
                 name += sh * (sw - 1);
 
                 for (int p = 0; (p < sw) && (num_pixels < MAX_PIXELS_PER_LINE); p++) {
-                    draw_pattern_sprite_over_planes(scr + sx + __fast_mul(p, 8), name, paty);
+                    /* A cell entirely off either edge lands in the overflow margin,
+                     * which is never copied out. */
+                    int cx = sx + __fast_mul(p, 8);
+                    if (cx > -8 && cx < screen_width)
+                        draw_pattern_sprite_over_planes(scr + cx, name, paty);
                     name -= sh;
                     num_pixels += 8;
                 }
             }
             else {
                 for (int p = 0; (p < sw) && (num_pixels < MAX_PIXELS_PER_LINE); p++) {
-                    draw_pattern_sprite_over_planes(scr + sx + __fast_mul(p, 8), name, paty);
+                    /* A cell entirely off either edge lands in the overflow margin,
+                     * which is never copied out. */
+                    int cx = sx + __fast_mul(p, 8);
+                    if (cx > -8 && cx < screen_width)
+                        draw_pattern_sprite_over_planes(scr + cx, name, paty);
                     name += sh;
                     num_pixels += 8;
                 }
@@ -968,14 +990,22 @@ void draw_sprites(int line) {
                 if (isfliph) {
                     name += sh * (sw - 1);
                     for (int p = 0; p < sw && num_pixels < MAX_PIXELS_PER_LINE; p++) {
-                        draw_pattern_sprite(scr + sx + __fast_mul(p, 8), name, paty);
+                        /* A cell entirely off either edge lands in the overflow margin,
+                         * which is never copied out. */
+                        int cx = sx + __fast_mul(p, 8);
+                        if (cx > -8 && cx < screen_width)
+                            draw_pattern_sprite(scr + cx, name, paty);
                         name -= sh;
                         num_pixels += 8;
                     }
                 }
                 else {
                     for (int p = 0; p < sw && num_pixels < MAX_PIXELS_PER_LINE; p++) {
-                        draw_pattern_sprite(scr + sx + __fast_mul(p, 8), name, paty);
+                        /* A cell entirely off either edge lands in the overflow margin,
+                         * which is never copied out. */
+                        int cx = sx + __fast_mul(p, 8);
+                        if (cx > -8 && cx < screen_width)
+                            draw_pattern_sprite(scr + cx, name, paty);
                         name += sh;
                         num_pixels += 8;
                     }
