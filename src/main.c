@@ -1117,6 +1117,7 @@ static void __time_critical_func(emulation_loop)(void) {
         
         system_clock = 0;
         scan_line = 0;
+        vdp_palette_frame_begin();      /* base palette is the truth again */
         
         // Reset Z80 clock for new frame (now runs on Core 0)
         extern volatile int zclk;
@@ -1188,6 +1189,10 @@ static void __time_critical_func(emulation_loop)(void) {
             
 #if VDP_RASTER_RENDER
             if (render_this_frame && scan_line < screen_height) {
+                /* Record the palette in force for this line before the
+                 * next line's emulation can split it. */
+                if (scan_line < HDMI_MAX_LINES)
+                    hdmi_line_lut[scan_line] = vdp_palette_current_lut();
                 vdp_pipeline_post(scan_line);
             }
 #endif

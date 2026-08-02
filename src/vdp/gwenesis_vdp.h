@@ -133,6 +133,13 @@ void gwenesis_vdp_set_buffer(uint8_t *ptr_screen_buffer);
 void gwenesis_vdp_get_buffer(uint16_t** ptr_screen_buffer);
 void gwenesis_vdp_render_line(int line);
 
+/* Raster palette splits: mid-frame CRAM writes go to spare display
+ * palette entries and the lines below the split are pointed at a table
+ * that maps to them. */
+extern bool vdp_palette_split_enabled;
+void           vdp_palette_frame_begin(void);
+const uint8_t *vdp_palette_current_lut(void);
+
 void gwenesis_vdp_render_config();
 
 unsigned int gwenesis_vdp_get_status();

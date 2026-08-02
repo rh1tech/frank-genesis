@@ -52,6 +52,7 @@ typedef enum {
     MENU_FM_SOUND,
     MENU_CHANNELS,
     MENU_CRT_EFFECT,
+    MENU_RASTER_PAL,
     MENU_CRT_DIM,
     MENU_FRAMESKIP,
     MENU_GAMEPAD2,
@@ -83,6 +84,7 @@ settings_t g_settings = {
     .fm_sound = true,
     .dac_sound = true,
     .crt_effect = false,
+    .raster_palette = true,
     .crt_dim = 60,
     .z80_enabled = true,
     .audio_enabled = true,
@@ -283,6 +285,7 @@ static const char* get_menu_label(menu_item_t item) {
         case MENU_FM_SOUND:     return "FM SOUND";
         case MENU_CHANNELS:     return "CHANNELS";
         case MENU_CRT_EFFECT:   return "CRT EFFECT";
+        case MENU_RASTER_PAL:   return "RASTER PAL";
         case MENU_CRT_DIM:      return "CRT DIM";
         case MENU_FRAMESKIP:    return "FRAMESKIP";
         case MENU_GAMEPAD2:     return "GAMEPAD 2";
@@ -322,6 +325,9 @@ static void get_menu_value(menu_item_t item, char *buf, size_t size) {
             break;
         case MENU_CRT_EFFECT:
             snprintf(buf, size, "< %s >", edit_settings.crt_effect ? "ON" : "OFF");
+            break;
+        case MENU_RASTER_PAL:
+            snprintf(buf, size, "< %s >", edit_settings.raster_palette ? "ON" : "OFF");
             break;
         case MENU_CRT_DIM:
             if (edit_settings.crt_effect) {
@@ -381,6 +387,9 @@ static void change_setting(menu_item_t item, int direction) {
             
         case MENU_CRT_EFFECT:
             edit_settings.crt_effect = !edit_settings.crt_effect;
+            break;
+        case MENU_RASTER_PAL:
+            edit_settings.raster_palette = !edit_settings.raster_palette;
             break;
             
         case MENU_CRT_DIM:
@@ -765,6 +774,7 @@ void settings_load(void) {
     g_settings.fm_sound = true;
     g_settings.dac_sound = true;
     g_settings.crt_effect = false;
+    g_settings.raster_palette = true;
     g_settings.crt_dim = 60;
     g_settings.z80_enabled = true;
     g_settings.audio_enabled = true;
@@ -805,6 +815,9 @@ void settings_load(void) {
         }
         else if (parse_ini_line(line, "fm_sound", value, sizeof(value))) {
             g_settings.fm_sound = (strcasecmp(value, "on") == 0 || strcmp(value, "1") == 0);
+        }
+        else if (parse_ini_line(line, "raster_palette", value, sizeof(value))) {
+            g_settings.raster_palette = (strcasecmp(value, "on") == 0 || strcmp(value, "1") == 0);
         }
         else if (parse_ini_line(line, "crt_effect", value, sizeof(value))) {
             g_settings.crt_effect = (strcasecmp(value, "on") == 0 || strcmp(value, "1") == 0);
@@ -898,6 +911,7 @@ bool settings_save(void) {
         "audio = %s\n"
         "fm_sound = %s\n"
         "crt_effect = %s\n"
+        "raster_palette = %s\n"
         "crt_dim = %d\n"
         "frameskip = %d\n"
         "gamepad2 = %s\n"
@@ -920,6 +934,7 @@ bool settings_save(void) {
         g_settings.audio_enabled ? "on" : "off",
         g_settings.fm_sound ? "on" : "off",
         g_settings.crt_effect ? "on" : "off",
+        g_settings.raster_palette ? "on" : "off",
         g_settings.crt_dim,
         g_settings.frameskip,
         gamepad2_mode_names[g_settings.gamepad2_mode],
@@ -991,6 +1006,10 @@ void settings_apply_runtime(void) {
     
     // CRT settings
     graphics_set_crt_effect(g_settings.crt_effect, g_settings.crt_dim);
+    {   /* Per-line palette for games that split CRAM mid-frame. */
+        extern bool vdp_palette_split_enabled;
+        vdp_palette_split_enabled = g_settings.raster_palette;
+    }
     
     // Frameskip
     set_frameskip_level(g_settings.frameskip);

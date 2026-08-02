@@ -58,6 +58,20 @@ uint32_t graphics_get_width(void);
 uint32_t graphics_get_height(void);
 void graphics_set_res(int w, int h);
 void graphics_set_shift(int x, int y);
+/* Longest source line count a per-line palette table must cover. */
+#define HDMI_MAX_LINES 240
+
+/* Per-line palette mapping, applied at scanout. Index by source line;
+ * every entry maps a 6-bit framebuffer index to a display palette entry.
+ * Defaults to identity, which reproduces the previous behaviour exactly. */
+/* 256 entries: maps a raw framebuffer byte straight to a display palette
+ * index, folding in the 0x3F mask and the HDMI sync-colour substitution
+ * that the scanout used to do inline. One load replaces mask + compare. */
+extern const uint8_t *hdmi_line_lut[HDMI_MAX_LINES];
+extern uint8_t hdmi_identity_lut[256];
+void hdmi_line_lut_init(void);
+void hdmi_line_lut_reset(void);
+
 void graphics_set_palette(uint8_t i, uint32_t color888);
 uint32_t graphics_get_palette(uint8_t i);
 void graphics_restore_sync_colors(void);

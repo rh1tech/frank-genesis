@@ -15,6 +15,7 @@ typedef struct {
     bool fm_sound;          // FM (YM2612) sound: true (default), false
     bool dac_sound;         // DAC sound: true (default), false
     bool crt_effect;        // CRT scanlines: false (default), true
+    bool raster_palette;    // Per-line palette for mid-frame CRAM writes: true (default)
     uint8_t crt_dim;        // CRT dim percentage: 10-90, default 60
     bool z80_enabled;       // Z80 CPU: true (default), false
     bool audio_enabled;     // Master audio: true (default), false

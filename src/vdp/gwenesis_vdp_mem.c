@@ -94,6 +94,92 @@ static inline int vdp_mid_frame(void) {
     return scan_line > 0 && scan_line < screen_height;
 }
 
+/* Raster palette splits.
+ *
+ * A CRAM write that lands while the beam is in the visible field must not
+ * change the colours of the lines already drawn above it. Those writes go
+ * to a spare display palette entry instead of the base one, and the lines
+ * below the split are pointed at a table that maps the affected index to
+ * that spare entry. Entries 0-63 are the base palette and 64-127 are the
+ * dim copies the CRT effect uses, so the spares live at 128 and up. */
+#define PAL_ALT_BASE   128
+#define PAL_ALT_SLOTS  112              /* 128..239; 240-243 are HDMI sync */
+#define PAL_MAX_STATES 8
+
+bool     vdp_palette_split_enabled = true;
+uint32_t vdp_palette_alt_used, vdp_palette_alt_exhausted, vdp_palette_states_max;
+
+static uint8_t pal_lut[PAL_MAX_STATES][256];
+static int     pal_state;               /* which table the beam is under */
+static int     pal_alt_next;            /* next free spare entry */
+static int     pal_split_line;          /* scanline the current state began */
+
+const uint8_t *vdp_palette_current_lut(void) { return pal_lut[pal_state]; }
+
+/* Called once per frame, before any line is drawn. */
+void vdp_palette_frame_begin(void) {
+    /* Entries that were redirected to a spare last frame still hold the
+     * old colour in the base palette; put the current CRAM value back so
+     * the top of this frame starts from the truth. Only the handful that
+     * were actually redirected need it. */
+    for (int i = 0; i < 64; i++) {
+        if (pal_lut[pal_state][i] != (uint8_t)i)
+            graphics_set_palette((uint8_t)i,
+                RGB888(CRAM_R(CRAM[i]), CRAM_G(CRAM[i]), CRAM_B(CRAM[i])));
+    }
+    /* Identity over the full byte: the top two bits are sprite/priority
+     * flags the display must ignore, so every alias of an index maps to
+     * the same colour. */
+    for (int i = 0; i < 256; i++) pal_lut[0][i] = (uint8_t)(i & 0x3F);
+    pal_state      = 0;
+    pal_alt_next   = 0;
+    pal_split_line = -1;
+}
+
+/* A CRAM entry changed while the beam was inside the visible field. */
+static void vdp_palette_split(uint8_t addr, uint16_t value)
+{
+    extern int scan_line;
+
+    /* Several entries can change on one scanline — that is one split. */
+    if (scan_line != pal_split_line) {
+        if (pal_state + 1 < PAL_MAX_STATES) {
+            memcpy(pal_lut[pal_state + 1], pal_lut[pal_state], 256);
+            pal_state++;
+            if ((uint32_t)pal_state > vdp_palette_states_max)
+                vdp_palette_states_max = (uint32_t)pal_state;
+        }
+        pal_split_line = scan_line;
+    }
+
+    if (pal_alt_next >= PAL_ALT_SLOTS) {
+        /* Out of spares: fall back to changing the base entry, which is
+         * the old behaviour for this one write rather than losing it. */
+        vdp_palette_alt_exhausted++;
+        graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
+        return;
+    }
+
+    uint8_t slot = (uint8_t)(PAL_ALT_BASE + pal_alt_next++);
+    if (pal_alt_next > (int)vdp_palette_alt_used) vdp_palette_alt_used = pal_alt_next;
+    /* All four aliases of this index (with the sprite/priority bits) map
+     * to the spare. */
+    pal_lut[pal_state][addr]        = slot;
+    pal_lut[pal_state][addr | 0x40] = slot;
+    pal_lut[pal_state][addr | 0x80] = slot;
+    pal_lut[pal_state][addr | 0xC0] = slot;
+    graphics_set_palette(slot, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
+}
+
+/* Route a CRAM write either to the base palette or to a spare. */
+static inline void vdp_cram_apply(uint8_t addr, uint16_t value)
+{
+    if (vdp_palette_split_enabled && vdp_mid_frame())
+        vdp_palette_split(addr, value);
+    else
+        graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
+}
+
 #ifdef VDP_RASTER_PROFILE
 #define RASTER_NOTE_CRAM(a, newv) do {                                     \
     if (vdp_mid_frame() && CRAM[a] != (newv)) {                            \
@@ -484,7 +570,7 @@ void gwenesis_vdp_dma_fill(unsigned short value) {
                 RASTER_NOTE_CRAM(addr, fifo[3]);
                 CRAM[addr] = fifo[3];
 
-                graphics_set_palette(addr, RGB888(CRAM_R(CRAM[addr]), CRAM_G(CRAM[addr]), CRAM_B(CRAM[addr])));
+                vdp_cram_apply(addr, CRAM[addr]);
 
                 address_reg += REG15_DMA_INCREMENT;
                 src_addr_low++;
@@ -571,7 +657,7 @@ void gwenesis_vdp_dma_m68k() {
                 RASTER_NOTE_CRAM(addr, value);
                     CRAM[addr] = value;
 
-                    graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
+                    vdp_cram_apply(addr, value);
 
                     address_reg += REG15_DMA_INCREMENT;
                     src_addr += 2;
@@ -623,7 +709,7 @@ void gwenesis_vdp_dma_m68k() {
                 RASTER_NOTE_CRAM(addr, value);
                     CRAM[addr] = value;
 
-                    graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
+                    vdp_cram_apply(addr, value);
 
                     address_reg += REG15_DMA_INCREMENT;
                     src_addr += 2;
@@ -847,7 +933,7 @@ void gwenesis_vdp_write_data_port_16(unsigned int value) {
                 RASTER_NOTE_CRAM(addr, value);
             CRAM[addr] = value;
 
-            graphics_set_palette(addr, RGB888(CRAM_R(value), CRAM_G(value), CRAM_B(value)));
+            vdp_cram_apply(addr, value);
 
             address_reg += REG15_DMA_INCREMENT;
             address_reg &= 0xFFFF;

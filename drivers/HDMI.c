@@ -256,6 +256,34 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
     pio_sm_exec(pio, sm, instr_mov);
 }
 
+/* Per-line palette mapping.
+ *
+ * A game can rewrite CRAM part-way down the screen (raster palette
+ * splits). The framebuffer holds 6-bit indices and the palette is applied
+ * here at scanout, so without this the last palette written wins for the
+ * whole frame — the visible symptom is bright bands that move up and down
+ * as the split line moves.
+ *
+ * The scanout already reads and masks every pixel, so routing it through
+ * a per-line table costs one extra load and lets lines above and below a
+ * split use different colours. Entries are identity until the emulator
+ * points a line at one of its alternates. */
+uint8_t        hdmi_identity_lut[256];
+const uint8_t *hdmi_line_lut[HDMI_MAX_LINES];
+
+void hdmi_line_lut_init(void) {
+    for (int i = 0; i < 256; i++) {
+        uint8_t c = (uint8_t)(i & 0x3F);
+        if (c >= 240 && c <= 243) c = color_substitute[c - 240];
+        hdmi_identity_lut[i] = c;
+    }
+    for (int i = 0; i < HDMI_MAX_LINES; i++) hdmi_line_lut[i] = hdmi_identity_lut;
+}
+
+void hdmi_line_lut_reset(void) {
+    for (int i = 0; i < HDMI_MAX_LINES; i++) hdmi_line_lut[i] = hdmi_identity_lut;
+}
+
 static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
     static uint32_t inx_buf_dma;
     static uint line = 0;
@@ -280,6 +308,7 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
     if (line < mode.h_width ) {
         uint8_t* output_buffer = activ_buf + 72; //для выравнивания синхры;
         int y = line >> 1;
+        const uint8_t *plut = (y < HDMI_MAX_LINES) ? hdmi_line_lut[y] : hdmi_identity_lut;
         // For CRT effect: odd display lines use dim palette (indices 64-127)
         uint8_t crt_offset = (crt_enabled && (y & 1)) ? 64 : 0;
         //область изображения
@@ -310,10 +339,10 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
                 register size_t x = 0;
                 while (activ_buf_end > output_buffer) {
                     if (x < graphics_buffer_width) {
-                        // Mask with 0x3F to get palette index (bits 6-7 are sprite/priority flags)
-                        register uint8_t c = input_buffer[x++] & 0x3F;
-                        // Substitute HDMI reserved colors with nearest matches
-                        if (c >= 240 && c <= 243) c = color_substitute[c - 240];
+                        /* One lookup: masks off the sprite/priority bits,
+                         * substitutes the HDMI sync colours and applies
+                         * this line's palette. */
+                        register uint8_t c = plut[input_buffer[x++]];
                         c |= crt_offset;  // Use dim palette for odd lines if CRT enabled
                         *output_buffer++ = c;
                     }
@@ -323,10 +352,7 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
                 break;
             default:
                 for (int i = SCREEN_WIDTH; i--;) {
-                    // Mask with 0x3F to get palette index (bits 6-7 are sprite/priority flags)
-                    uint8_t i_color = *input_buffer++ & 0x3F;
-                    // Substitute HDMI reserved colors with nearest matches
-                    if (i_color >= 240 && i_color <= 243) i_color = color_substitute[i_color - 240];
+                    uint8_t i_color = plut[*input_buffer++];
                     i_color |= crt_offset;  // Use dim palette for odd lines if CRT enabled
                     *output_buffer++ = i_color;
                 }
@@ -441,6 +467,8 @@ static inline bool hdmi_init() {
     offs_prg1 = pio_add_program(PIO_VIDEO_ADDR, &pio_program_conv_addr_HDMI);
     offs_prg0 = pio_add_program(PIO_VIDEO, &program_PIO_HDMI);
     pio_set_x(PIO_VIDEO_ADDR, SM_conv, ((uint32_t)conv_color >> 12));
+
+    hdmi_line_lut_init();
 
     //заполнение палитры (skip only sync control 240-243, but initialize 244-254)
     for (int ci = 0; ci < 240; ci++) graphics_set_palette_hdmi(ci, palette[ci]);
