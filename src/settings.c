@@ -12,6 +12,10 @@
 #include "nespad/nespad.h"
 #include "ps2kbd/ps2kbd_wrapper.h"
 #include "audio.h"
+#include "psram_allocator.h"
+#if defined(BOARD_C2) && !defined(C2_LOCAL_SOUND)
+#include "link_master.h"
+#endif
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,10 +56,11 @@ typedef enum {
     MENU_FM_SOUND,
     MENU_CHANNELS,
     MENU_CRT_EFFECT,
-    MENU_RASTER_PAL,
     MENU_CRT_DIM,
+    MENU_RASTER_PAL,
     MENU_FRAMESKIP,
     MENU_GAMEPAD2,
+    MENU_BOARD_INFO,
     MENU_SEPARATOR,  // Visual separator
     MENU_SAVE_RESTART,
     MENU_ROM_SELECT,
@@ -351,6 +356,7 @@ static const char* get_menu_label(menu_item_t item) {
         case MENU_CRT_DIM:      return "CRT DIM";
         case MENU_FRAMESKIP:    return "FRAMESKIP";
         case MENU_GAMEPAD2:     return "GAMEPAD 2";
+        case MENU_BOARD_INFO:   return "BOARD INFO";
         case MENU_SEPARATOR:    return "";
         case MENU_SAVE_RESTART: return "SAVE AND RESTART";
         case MENU_ROM_SELECT:   return "BACK TO ROM SELECT";
@@ -382,7 +388,8 @@ static void get_menu_value(menu_item_t item, char *buf, size_t size) {
             }
             break;
         case MENU_CHANNELS:
-            // Submenu - no value displayed here
+        case MENU_BOARD_INFO:
+            // Opens its own screen - nothing to show on this row
             buf[0] = '\0';
             break;
         case MENU_CRT_EFFECT:
@@ -444,7 +451,8 @@ static void change_setting(menu_item_t item, int direction) {
             break;
             
         case MENU_CHANNELS:
-            // Handled separately - opens submenu
+        case MENU_BOARD_INFO:
+            // Handled separately - opens its own screen
             break;
             
         case MENU_CRT_EFFECT:
@@ -725,6 +733,186 @@ static bool show_channel_submenu(uint8_t *screen_buffer) {
         }
         
         sleep_ms(50);
+    }
+}
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// Board info
+//
+// What this unit actually is, so a bug report can say so without the
+// reporter having to open the case. Sizes come from the board header and
+// the PSRAM allocator rather than being probed, because that is how the
+// firmware itself is configured -- if they disagree with the hardware, the
+// firmware is already wrong and this screen is where that shows up.
+//
+// The slave figures are whatever it reported at the last probe. Asking it
+// again here would put a HELLO on the wire in the middle of whatever the
+// sound path is doing, which is not worth it for a status page.
+// ───────────────────────────────────────────────────────────────────────────
+#define INFO_LABEL_X 34
+#define INFO_VALUE_R (SCREEN_WIDTH - 34)
+
+static void info_row(uint8_t *screen, int y, const char *label, const char *value,
+                     uint8_t value_color) {
+    draw_text(screen, INFO_LABEL_X, y, label, COLOR_GRAY);
+    int w = (int)strlen(value) * FONT_WIDTH;
+    draw_text(screen, INFO_VALUE_R - w, y, value, value_color);
+}
+
+static void paint_board_info(uint8_t *screen, int unused) {
+    (void)unused;
+    char buf[40];
+
+    fill_rect(screen, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
+
+    const char *title = "BOARD INFO";
+    draw_text(screen, (SCREEN_WIDTH - (int)strlen(title) * FONT_WIDTH) / 2,
+              MENU_TITLE_Y, title, COLOR_WHITE);
+    draw_hline(screen, 40, MENU_TITLE_Y + FONT_HEIGHT + 4, SCREEN_WIDTH - 80, COLOR_GRAY);
+
+    int y = MENU_TITLE_Y + FONT_HEIGHT + 16;
+
+#if defined(BOARD_C2)
+    const char *board = "FRANK CORE 2";
+    const char *mcu   = "RP2350B";
+#elif defined(BOARD_M2)
+    const char *board = "FRANK M2";
+    const char *mcu   = "RP2350";
+#else
+    const char *board = "FRANK M1";
+    const char *mcu   = "RP2350";
+#endif
+    info_row(screen, y, "BOARD", board, COLOR_WHITE);            y += LINE_HEIGHT;
+    info_row(screen, y, "MCU", mcu, COLOR_WHITE);                y += LINE_HEIGHT;
+
+    snprintf(buf, sizeof(buf), "%lu MHZ",
+             (unsigned long)((clock_get_hz(clk_sys) + 500000) / 1000000));
+    info_row(screen, y, "CPU CLOCK", buf, COLOR_WHITE);          y += LINE_HEIGHT;
+
+#if defined(SRAM_BASE) && defined(SRAM_END)
+    snprintf(buf, sizeof(buf), "%lu KB", (unsigned long)((SRAM_END - SRAM_BASE) / 1024));
+#else
+    snprintf(buf, sizeof(buf), "520 KB");
+#endif
+    info_row(screen, y, "SRAM", buf, COLOR_WHITE);               y += LINE_HEIGHT;
+
+#ifdef PICO_FLASH_SIZE_BYTES
+    snprintf(buf, sizeof(buf), "%lu MB", (unsigned long)(PICO_FLASH_SIZE_BYTES / (1024 * 1024)));
+#else
+    snprintf(buf, sizeof(buf), "UNKNOWN");
+#endif
+    info_row(screen, y, "FLASH", buf, COLOR_WHITE);              y += LINE_HEIGHT;
+
+    snprintf(buf, sizeof(buf), "%lu MB / %u MHZ",
+             (unsigned long)(MURMDOOM_PSRAM_SIZE_BYTES / (1024 * 1024)),
+             (unsigned)g_settings.psram_freq);
+    info_row(screen, y, "PSRAM", buf, COLOR_WHITE);              y += LINE_HEIGHT;
+
+#ifdef FRANK_GENESIS_VERSION
+    snprintf(buf, sizeof(buf), "V%s", FRANK_GENESIS_VERSION);
+    info_row(screen, y, "FIRMWARE", buf, COLOR_WHITE);           y += LINE_HEIGHT;
+#endif
+
+#if defined(BOARD_C2) && !defined(C2_LOCAL_SOUND)
+    y += 4;
+    draw_hline(screen, 40, y, SCREEN_WIDTH - 80, COLOR_GRAY);
+    y += 8;
+
+    bool up = link_master_connected();
+    info_row(screen, y, "SOUND LINK", up ? "CONNECTED" : "OFFLINE",
+             up ? COLOR_WHITE : COLOR_RED);                      y += LINE_HEIGHT;
+
+    uint32_t rate = link_master_byte_rate();
+    if (rate) {
+        snprintf(buf, sizeof(buf), "%lu KB/S", (unsigned long)(rate / 1024));
+        info_row(screen, y, "LINK RATE", buf, COLOR_WHITE);      y += LINE_HEIGHT;
+    }
+
+    link_node_info_t ni;
+    if (link_master_last_info(&ni)) {
+        snprintf(buf, sizeof(buf), "%s %lu MHZ",
+                 ni.package_is_a ? "RP2350A" : "RP2350B",
+                 (unsigned long)((ni.sys_clk_hz + 500000) / 1000000));
+        info_row(screen, y, "SOUND CHIP", buf, COLOR_WHITE);     y += LINE_HEIGHT;
+
+        if (ni.psram_bytes) {
+            snprintf(buf, sizeof(buf), "%lu MB",
+                     (unsigned long)(ni.psram_bytes / (1024 * 1024)));
+            info_row(screen, y, "SOUND PSRAM", buf, COLOR_WHITE);y += LINE_HEIGHT;
+        }
+
+        snprintf(buf, sizeof(buf), "V%u.%u", (unsigned)(ni.fw_version >> 8),
+                 (unsigned)(ni.fw_version & 0xFF));
+        info_row(screen, y, "SOUND FW", buf, COLOR_WHITE);       y += LINE_HEIGHT;
+    } else {
+        info_row(screen, y, "SOUND CHIP", "NOT DETECTED", COLOR_RED);
+        y += LINE_HEIGHT;
+    }
+#endif
+
+    const char *help = "B: BACK";
+    draw_text(screen, (SCREEN_WIDTH - (int)strlen(help) * FONT_WIDTH) / 2,
+              SCREEN_HEIGHT - 20, help, COLOR_GRAY);
+}
+
+static void show_board_info(uint8_t *screen_buffer) {
+    compose_banded(paint_board_info, screen_buffer, 0);
+
+    /* Let go of the key that opened this before listening for the one
+     * that closes it. */
+    while (true) {
+        nespad_read();
+        ps2kbd_tick();
+        uint16_t k = ps2kbd_get_state();
+#ifdef USB_HID_ENABLED
+        k |= usbhid_get_kbd_state();
+        usbhid_task();
+#endif
+        if (!(nespad_state & (DPAD_A | DPAD_B | DPAD_START)) && k == 0) break;
+        sleep_ms(20);
+    }
+
+    while (true) {
+        nespad_read();
+        uint32_t buttons = nespad_state;
+
+        ps2kbd_tick();
+        uint16_t kbd_state = ps2kbd_get_state();
+#ifdef USB_HID_ENABLED
+        kbd_state |= usbhid_get_kbd_state();
+        usbhid_task();
+#endif
+        if (kbd_state & KBD_STATE_A)     buttons |= DPAD_A;
+        if (kbd_state & KBD_STATE_B)     buttons |= DPAD_B;
+        if (kbd_state & KBD_STATE_START) buttons |= DPAD_START;
+        if (kbd_state & KBD_STATE_ESC)   buttons |= DPAD_B;
+
+#ifdef USB_HID_ENABLED
+        if (usbhid_gamepad_connected()) {
+            usbhid_gamepad_state_t gp;
+            usbhid_get_gamepad_state(&gp);
+            if (gp.buttons & 0x01) buttons |= DPAD_A;
+            if (gp.buttons & 0x02) buttons |= DPAD_B;
+            if (gp.buttons & 0x40) buttons |= DPAD_START;
+        }
+#endif
+
+        if (buttons & (DPAD_A | DPAD_B | DPAD_START)) break;
+        sleep_ms(30);
+    }
+
+    /* And release that one, so it does not fall through into the menu. */
+    while (true) {
+        nespad_read();
+        ps2kbd_tick();
+        uint16_t k = ps2kbd_get_state();
+#ifdef USB_HID_ENABLED
+        k |= usbhid_get_kbd_state();
+        usbhid_task();
+#endif
+        if (!(nespad_state & (DPAD_A | DPAD_B | DPAD_START)) && k == 0) break;
+        sleep_ms(20);
     }
 }
 
@@ -1264,6 +1452,11 @@ settings_result_t settings_menu_show_with_restore(uint8_t *screen_buffer, uint8_
                         show_channel_submenu(screen_buffer);
                         draw_settings_menu(screen_buffer, selected);
                     }
+                    break;
+
+                case MENU_BOARD_INFO:
+                    show_board_info(screen_buffer);
+                    draw_settings_menu(screen_buffer, selected);
                     break;
                     
                 case MENU_RESUME: {

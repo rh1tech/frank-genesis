@@ -56,6 +56,12 @@
 #define PAL_BLACK        1   // near-black backdrop (index 0/1 both near-black)
 #define PAL_BG_TINT      2   // deep blue-black welcome/browser background
 #define PAL_DARK_GRAY    16  // scrollbar track
+#define PAL_PAD_DARK     17  // controller body shadow
+#define PAL_PAD_MID      18  // controller body
+#define PAL_PAD_LIGHT    19  // controller bevel / D-pad cross
+#define PAL_PAD_RECESS   20  // D-pad well
+#define PAL_PAD_BTN      21  // A/B/C and START faces
+#define PAL_PAD_BTN_HI   22  // button bevel
 #define PAL_RED          32  // accent (errors, warnings)
 #define PAL_GRAY         42  // medium gray for hints and body text
 #define PAL_YELLOW       48  // reserved for settings (used by settings menu)
@@ -295,6 +301,12 @@ static void setup_ui_palette(void) {
     graphics_set_palette(1,  0x020202);
     graphics_set_palette(PAL_BG_TINT,     0x080C18);  // deep blue-black
     graphics_set_palette(PAL_DARK_GRAY,   0x404040);
+    graphics_set_palette(PAL_PAD_DARK,    0x24242C);   // controller charcoal
+    graphics_set_palette(PAL_PAD_MID,     0x3A3A46);
+    graphics_set_palette(PAL_PAD_LIGHT,   0x6E6E80);
+    graphics_set_palette(PAL_PAD_RECESS,  0x121216);
+    graphics_set_palette(PAL_PAD_BTN,     0x4A4A58);
+    graphics_set_palette(PAL_PAD_BTN_HI,  0x9AA0B4);
     graphics_set_palette(PAL_RED,         0xFF3030);
     graphics_set_palette(PAL_GRAY,        0x909090);
     graphics_set_palette(PAL_YELLOW,      0xFFE030);
@@ -467,20 +479,17 @@ static void init_starfield(void) {
 // written by stars, or the stars will punch holes through them. Callers
 // pass a predicate that returns true when (x,y) is free for the starfield.
 static bool star_pixel_allowed(int x, int y,
-                               int logo_cx, int logo_cy, int logo_r2,
+                               int lx0, int ly0, int lx1, int ly1,
                                int text_top, int text_bottom) {
     if (y >= text_top && y < text_bottom) return false;
-    int dx = x - logo_cx;
-    int dy = y - logo_cy;
-    if (dx * dx + dy * dy <= logo_r2) return false;
+    if (x >= lx0 && x <= lx1 && y >= ly0 && y <= ly1) return false;
     return true;
 }
 
 static void step_starfield(uint8_t *fb,
-                           int logo_cx, int logo_cy, int logo_r,
+                           int lx0, int ly0, int lx1, int ly1,
                            int text_top, int text_bottom) {
     if (!g_stars_ready) init_starfield();
-    int logo_r2 = (logo_r + 1) * (logo_r + 1);
     for (int i = 0; i < STAR_COUNT; ++i) {
         // Erase previous pixel (restore background tint) if it was drawn.
         if (g_stars[i].prev_x >= 0)
@@ -493,7 +502,7 @@ static void step_starfield(uint8_t *fb,
 
         int sx = g_stars[i].x >> 8;
         int sy = g_stars[i].y >> 8;
-        if (star_pixel_allowed(sx, sy, logo_cx, logo_cy, logo_r2,
+        if (star_pixel_allowed(sx, sy, lx0, ly0, lx1, ly1,
                                text_top, text_bottom)) {
             fb_pixel(fb, sx, sy, g_stars[i].color);
             g_stars[i].prev_x = (int16_t)sx;
@@ -506,77 +515,102 @@ static void step_starfield(uint8_t *fb,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Welcome screen — Genesis-themed controller logo on a starfield backdrop.
+// Welcome screen — Genesis 3-button controller on a starfield backdrop.
 //
-// 26×12 pixel logo, scaled ×3. The bitmap below sketches a Genesis-ish
-// 3-button pad: D-pad on the left, three action buttons (A/B/C) on the right.
-// Uses the Genesis palette (blue/cyan instead of NES red/gray) so the
-// welcome screen clearly reads "Genesis" rather than "NES".
+// 92×44 pixel logo at native resolution. Drawn to match the real pad
+// rather than suggest it: a wide rounded body with the underside bowed
+// down, the round D-pad well with its raised cross on the left, A/B/C in a
+// gentle arc rising to the right, and the small START oval low in the
+// middle. Drawn 1:1 rather than as a scaled-up smaller bitmap, because at
+// double scale the buttons were too few pixels across to read as circles.
 //
-// Pixel legend: 0 = transparent, 1 = black outline, 2 = body navy,
-//               3 = body blue, 4 = body light accent, 5 = D-pad fill,
-//               6 = A/B/C button (bright cyan), 7 = button ring
+// The body is charcoal like the real thing, not the Genesis blue that was
+// here before — a pad that is the wrong colour does not read as a pad. It
+// stays legible against the dark starfield through the bevel highlights,
+// which is what you would see on a photograph of one anyway.
+//
+// Pixel legend: 0 = transparent, 1 = outline, 2 = body shadow,
+//               3 = body, 4 = top bevel and D-pad cross, 5 = D-pad well,
+//               6 = A/B/C and START faces, 7 = button bevel
 // ───────────────────────────────────────────────────────────────────────────
-#define LOGO_W 26
-#define LOGO_H 12
+#define LOGO_W 92
+#define LOGO_H 44
 
 static const uint8_t genesis_logo[LOGO_H][LOGO_W] = {
-    {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0},
-    {0,1,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,1,0,0},
-    {1,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,0},
-    {1,3,3,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,0},
-    {1,3,2,2,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,0},
-    {1,3,2,5,5,5,2,3,3,3,3,3,3,3,3,7,7,3,7,7,3,7,7,3,1,0},
-    {1,3,2,5,5,5,2,3,3,3,3,3,3,3,7,6,6,7,6,6,7,6,6,7,1,0},
-    {1,3,2,5,5,5,2,3,3,3,3,3,3,3,7,6,6,7,6,6,7,6,6,7,1,0},
-    {1,3,2,2,5,2,2,3,3,3,3,3,3,3,3,7,7,3,7,7,3,7,7,3,1,0},
-    {1,3,3,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,0},
-    {0,1,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,0,0},
-    {0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,1,1,1,1,3,3,3,3,3,3,3,3,3,3,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,1,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,1,1,1,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,1,1,3,3,3,3,3,3,3,3,2,2,2,2,5,5,5,5,5,5,5,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0,0,0,0,0,0},
+    {0,0,0,0,0,1,1,3,3,3,3,3,3,3,3,2,2,2,5,5,5,5,5,5,5,5,5,5,5,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0,0,0,0,0},
+    {0,0,0,0,1,1,3,3,3,3,3,3,3,3,2,2,5,5,5,5,4,4,4,4,4,4,4,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0,0,0,0},
+    {0,0,0,1,1,3,3,3,3,3,3,3,3,2,2,5,5,5,5,5,4,4,4,4,4,4,4,5,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,3,1,1,0,0,0},
+    {0,0,1,1,3,3,3,3,3,3,3,3,2,2,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,7,7,7,2,2,3,1,1,0,0},
+    {0,0,1,3,3,3,3,3,3,3,3,3,2,5,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,5,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,7,7,7,7,7,7,7,2,3,1,0,0},
+    {0,1,1,3,3,3,3,3,3,3,3,2,2,5,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,7,7,7,7,7,7,7,2,2,1,1,0},
+    {0,1,3,3,3,3,3,3,3,3,3,2,5,5,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,5,5,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,6,6,6,6,6,6,6,6,6,2,3,1,0},
+    {0,1,3,3,3,3,3,3,3,3,2,2,5,5,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,3,3,3,2,6,6,6,6,6,6,6,6,6,2,3,1,0},
+    {0,1,3,3,3,3,3,3,3,3,2,2,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,7,7,7,7,7,2,2,3,3,2,6,6,6,6,6,6,6,6,6,2,3,1,0},
+    {0,1,3,3,3,3,3,3,3,3,2,2,5,5,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,7,7,7,7,7,7,7,2,2,3,2,6,6,6,6,6,6,6,6,6,2,3,1,0},
+    {0,1,3,3,3,3,3,3,3,3,2,2,5,5,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,6,7,7,7,7,7,7,7,6,2,3,2,2,6,6,6,6,6,6,6,2,2,3,1,0},
+    {0,1,3,3,3,3,3,3,3,3,2,2,5,5,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,3,3,3,3,2,6,6,6,6,6,6,6,6,6,2,3,3,2,6,6,6,6,6,6,6,2,3,3,1,0},
+    {0,1,3,3,3,3,3,3,3,3,2,2,5,5,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,7,7,7,2,2,3,3,3,2,6,6,6,6,6,6,6,6,6,2,3,3,3,2,2,6,6,6,2,2,3,3,3,1,0},
+    {0,1,3,3,3,3,3,3,3,3,2,2,5,5,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,7,7,7,7,7,7,7,2,3,3,2,6,6,6,6,6,6,6,6,6,2,3,3,3,3,2,2,2,2,2,3,3,3,3,1,0},
+    {0,1,3,3,3,3,3,3,3,3,2,2,5,5,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,7,7,7,7,7,7,7,2,2,3,2,6,6,6,6,6,6,6,6,6,2,3,3,3,3,3,3,3,3,3,3,3,3,3,1,0},
+    {0,1,1,3,3,3,3,3,3,3,3,2,5,5,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,5,5,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,6,6,6,6,6,6,6,6,6,2,3,2,2,6,6,6,6,6,6,6,2,2,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0},
+    {0,0,1,3,3,3,3,3,3,3,3,2,2,5,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,6,6,6,6,6,6,6,6,6,2,3,3,2,2,6,6,6,6,6,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,1,0,0},
+    {0,0,1,1,3,3,3,3,3,3,3,3,2,5,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,5,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,6,6,6,6,6,6,6,6,6,2,3,3,3,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0,0},
+    {0,0,0,1,1,3,3,3,3,3,3,3,2,2,5,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,6,6,6,6,6,6,6,6,6,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0,0,0},
+    {0,0,0,0,1,1,3,3,3,3,3,3,3,2,2,5,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,6,6,6,6,6,6,6,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0,0,0,0},
+    {0,0,0,0,0,1,1,3,3,3,3,3,3,3,2,2,5,5,5,5,3,3,3,3,3,3,3,5,5,5,5,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,6,6,6,6,6,6,6,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0,0,0,0,0},
+    {0,0,0,0,0,0,1,1,3,3,3,3,3,3,3,2,2,2,5,5,5,5,5,5,5,5,5,5,5,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,6,6,6,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,1,1,1,3,3,3,3,3,3,2,2,2,2,5,5,5,5,5,5,5,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,1,1,1,1,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,1,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,3,3,3,3,3,3,3,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,7,7,7,7,7,7,7,7,7,7,7,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,3,3,3,3,3,3,3,3,3,3,3,3,3,3,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,6,6,6,6,6,6,6,6,6,6,6,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
 };
 
 static const uint8_t logo_pal[8] = {
-    0,              // 0 transparent
-    PAL_BLACK,      // 1 outline
-    PAL_NAVY,       // 2 body shadow
-    PAL_BLUE,       // 3 body blue
-    PAL_LIGHT_CYAN, // 4 top highlight
-    PAL_WHITE,      // 5 D-pad fill
-    PAL_CYAN,       // 6 A/B/C button
-    PAL_LIGHT_CYAN, // 7 button ring
+    0,                // 0 transparent
+    PAL_BLACK,        // 1 outline
+    PAL_PAD_DARK,     // 2 body shadow / D-pad well rim
+    PAL_PAD_MID,      // 3 body
+    PAL_PAD_LIGHT,    // 4 top bevel and the raised D-pad cross
+    PAL_PAD_RECESS,   // 5 D-pad well
+    PAL_PAD_BTN,      // 6 A/B/C faces and START
+    PAL_PAD_BTN_HI,   // 7 button bevel
 };
 
-static void draw_logo_3x(uint8_t *fb, int ox, int oy) {
+#define LOGO_SCALE 1
+
+static void draw_logo(uint8_t *fb, int ox, int oy) {
     for (int y = 0; y < LOGO_H; ++y) {
         for (int x = 0; x < LOGO_W; ++x) {
             uint8_t px = genesis_logo[y][x];
             if (px == 0) continue;
             uint8_t c = logo_pal[px];
-            int dx = ox + x * 3;
-            int dy = oy + y * 3;
-            for (int sy = 0; sy < 3; ++sy)
-                for (int sx = 0; sx < 3; ++sx)
+            int dx = ox + x * LOGO_SCALE;
+            int dy = oy + y * LOGO_SCALE;
+            for (int sy = 0; sy < LOGO_SCALE; ++sy)
+                for (int sx = 0; sx < LOGO_SCALE; ++sx)
                     fb_pixel(fb, dx + sx, dy + sy, c);
         }
     }
 }
 
-static void draw_filled_circle(uint8_t *fb, int cx, int cy, int r, uint8_t color) {
-    int four_r2 = 4 * r * r;
-    for (int y = cy - r; y <= cy + r; ++y) {
-        if ((unsigned)y >= SCREEN_HEIGHT) continue;
-        int dy = y - cy;
-        int limit = four_r2 - 4 * dy * dy;
-        if (limit <= 0) continue;
-        int dx = 0;
-        while ((2 * dx + 3) * (2 * dx + 3) <= limit) dx++;
-        int x0 = cx - dx;
-        int x1 = cx + dx;
-        if (x0 < 0) x0 = 0;
-        if (x1 >= SCREEN_WIDTH) x1 = SCREEN_WIDTH - 1;
-        if (x0 <= x1) memset(&fb[y * SCREEN_WIDTH + x0], color, x1 - x0 + 1);
-    }
-}
 
 void welcome_screen_show(uint8_t *screen_buffer) {
     setup_ui_palette();
@@ -600,18 +634,29 @@ void welcome_screen_show(uint8_t *screen_buffer) {
     // --- Draw static chrome ONCE. After this, only the starfield pixels
     //     and the blink area are updated per frame. Full-screen memsets
     //     every tick were racing HDMI DMA and causing the moving black line.
+    /* Frame around the pad: a plain rectangle with the same padding on
+     * every side, sized from the artwork rather than a fixed number so it
+     * stays even if the pad is ever redrawn. */
     const int cx = SCREEN_WIDTH / 2;
     const int cy = 80;
-    const int r  = 46;
+    const int pad_w = LOGO_W * LOGO_SCALE;
+    const int pad_h = LOGO_H * LOGO_SCALE;
+    const int frame_pad    = 14;   /* equal on all four sides */
+    const int frame_border = 3;
+    const int fw = pad_w + frame_pad * 2;
+    const int fh = pad_h + frame_pad * 2;
+    const int fx = cx - fw / 2;
+    const int fy = cy - fh / 2;
     const int blink_y = 220;
     const int blink_h = FONT_HEIGHT + 2;
 
     fb_fill(screen_buffer, PAL_BG_TINT);
 
-    draw_filled_circle(screen_buffer, cx, cy + 1, r + 1, PAL_LOGO_SHADOW);
-    draw_filled_circle(screen_buffer, cx, cy, r, PAL_NAVY);
-    draw_filled_circle(screen_buffer, cx, cy, r - 3, PAL_BG_TINT);
-    draw_logo_3x(screen_buffer, cx - (LOGO_W * 3) / 2, cy - (LOGO_H * 3) / 2);
+    fill_rect(screen_buffer, fx + 2, fy + 2, fw, fh, PAL_LOGO_SHADOW);
+    fill_rect(screen_buffer, fx, fy, fw, fh, PAL_NAVY);
+    fill_rect(screen_buffer, fx + frame_border, fy + frame_border,
+              fw - frame_border * 2, fh - frame_border * 2, PAL_BG_TINT);
+    draw_logo(screen_buffer, cx - pad_w / 2, cy - pad_h / 2);
 
     draw_text_center_shadow(screen_buffer, 148, "FRANK GENESIS", PAL_WHITE,  PAL_BLACK);
     draw_text_center_shadow(screen_buffer, 162, version_str,     PAL_CYAN,   PAL_BLACK);
@@ -630,7 +675,8 @@ void welcome_screen_show(uint8_t *screen_buffer) {
     while (true) {
         // Only the starfield and the PRESS START line change. We erase each
         // star's previous pixel individually, then advance it.
-        step_starfield(screen_buffer, cx, cy, r, text_top, text_bottom);
+        step_starfield(screen_buffer, fx, fy, fx + fw + 1, fy + fh + 1,
+                       text_top, text_bottom);
 
         if (frame >= 120) {
             bool want_on = ((frame / 30) & 1) == 0;

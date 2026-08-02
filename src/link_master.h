@@ -31,6 +31,12 @@ bool link_master_probe(uint32_t timeout_us, link_node_info_t *info);
 /* True once a probe has succeeded and no exchange has failed since. */
 bool link_master_connected(void);
 
+/* Slave identity from the last successful probe (false if never probed). */
+bool link_master_last_info(link_node_info_t *out);
+
+/* Measured wire rate in bytes per second, 0 if the link is not up. */
+uint32_t link_master_byte_rate(void);
+
 /* Round-trip latency probe, for diagnostics. Returns false if the slave
  * did not answer; `rtt_us` is filled on success. */
 bool link_master_ping(uint32_t *rtt_us);

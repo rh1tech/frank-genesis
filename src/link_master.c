@@ -100,6 +100,24 @@ void link_master_init(void) {
         (unsigned long)(link_byte_rate(&link) / 1024));
 }
 
+/* What the slave said about itself at the last successful probe.
+ *
+ * Kept so the board-info screen can report the far side without putting a
+ * HELLO on the wire mid-session, which would cut across whatever exchange
+ * the sound path is in the middle of. */
+static link_node_info_t last_info;
+static bool             last_info_valid;
+
+bool link_master_last_info(link_node_info_t *out) {
+    if (!last_info_valid) return false;
+    if (out) *out = last_info;
+    return true;
+}
+
+uint32_t link_master_byte_rate(void) {
+    return initialized ? link_byte_rate(&link) : 0;
+}
+
 bool link_master_probe(uint32_t timeout_us, link_node_info_t *info) {
     if (!initialized) return false;
 
@@ -113,6 +131,8 @@ bool link_master_probe(uint32_t timeout_us, link_node_info_t *info) {
         link_node_info_t ni;
         memcpy(&ni, ctrl_rx + sizeof(link_hdr_t), sizeof(ni));
         if (info) *info = ni;
+        last_info = ni;
+        last_info_valid = true;
 
         /* Match the wire rate to the slower half.
          *
@@ -148,6 +168,7 @@ bool link_master_probe(uint32_t timeout_us, link_node_info_t *info) {
 bool link_master_connected(void) {
     return connected;
 }
+
 
 bool link_master_ping(uint32_t *rtt_us) {
     if (!initialized) return false;
