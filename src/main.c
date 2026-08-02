@@ -1322,9 +1322,15 @@ static void __time_critical_func(emulation_loop)(void) {
         
         {   /* per-frame peak of mid-frame palette changes */
             extern uint32_t cram_changes_this_frame, cram_changes_max;
+            extern uint32_t cram_splits_this_frame, cram_splits_max;
+            extern int cram_last_line;
             if (cram_changes_this_frame > cram_changes_max)
                 cram_changes_max = cram_changes_this_frame;
+            if (cram_splits_this_frame > cram_splits_max)
+                cram_splits_max = cram_splits_this_frame;
             cram_changes_this_frame = 0;
+            cram_splits_this_frame = 0;
+            cram_last_line = -1;
         }
         frame_counter++;
         m68k.cycles -= system_clock;

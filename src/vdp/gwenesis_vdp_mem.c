@@ -81,6 +81,10 @@ uint32_t vdp_vsram_writes_active, vdp_cram_writes_active, vdp_vram_writes_active
 uint32_t cram_addr_mask_lo, cram_addr_mask_hi;   /* which of the 64 entries */
 uint8_t  cram_line_hist[240];                    /* lines that saw a change */
 uint32_t cram_changes_this_frame, cram_changes_max;
+/* Distinct scanlines that see a palette change within ONE frame: that is
+ * how many palette states the display would have to hold at once. */
+int      cram_last_line = -1;
+uint32_t cram_splits_this_frame, cram_splits_max;
 
 /* True while the beam is inside the visible field. Anything a game
  * changes here is a raster effect, and the end-of-frame renderer cannot
@@ -100,6 +104,10 @@ static inline int vdp_mid_frame(void) {
         if (scan_line < 240 && cram_line_hist[scan_line] < 255)            \
             cram_line_hist[scan_line]++;                                   \
         cram_changes_this_frame++;                                         \
+        if (scan_line != cram_last_line) {                                 \
+            cram_last_line = scan_line;                                    \
+            cram_splits_this_frame++;                                      \
+        }                                                                  \
     }                                                                      \
 } while (0)
 #define RASTER_NOTE_VRAM() do { if (vdp_mid_frame()) vdp_vram_writes_active++; } while (0)
