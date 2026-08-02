@@ -1792,132 +1792,132 @@ int main(void) {
     for (;;) {
     
 #if AUTOBOOT_LAST_ROM
-    /* Development aid, off by default: boot straight into the ROM the
-     * browser last opened, so a flash-and-test cycle needs no keypress.
-     * Only useful when iterating on something that has to be observed
-     * while a game runs. */
-    /* Validate before trusting it. Saved settings can be corrupt — a
-     * garbage browser_file built a garbage path here and left the
-     * firmware stuck inside printf with a nonsense length, which looks
-     * like a hang with no obvious cause. Fall back to the browser
-     * instead of acting on rubbish. */
-    bool autoboot_ok = false;
-    {
-        size_t n = 0;
-        while (n < sizeof(g_settings.browser_file) && g_settings.browser_file[n]) n++;
-        if (n > 0 && n < sizeof(g_settings.browser_file)) {
-            autoboot_ok = true;
-            for (size_t i = 0; i < n; i++) {
-                unsigned char c = (unsigned char)g_settings.browser_file[i];
-                if (c < 0x20 || c > 0x7E) { autoboot_ok = false; break; }
+        /* Development aid, off by default: boot straight into the ROM the
+         * browser last opened, so a flash-and-test cycle needs no keypress.
+         * Only useful when iterating on something that has to be observed
+         * while a game runs. */
+        /* Validate before trusting it. Saved settings can be corrupt — a
+         * garbage browser_file built a garbage path here and left the
+         * firmware stuck inside printf with a nonsense length, which looks
+         * like a hang with no obvious cause. Fall back to the browser
+         * instead of acting on rubbish. */
+        bool autoboot_ok = false;
+        {
+            size_t n = 0;
+            while (n < sizeof(g_settings.browser_file) && g_settings.browser_file[n]) n++;
+            if (n > 0 && n < sizeof(g_settings.browser_file)) {
+                autoboot_ok = true;
+                for (size_t i = 0; i < n; i++) {
+                    unsigned char c = (unsigned char)g_settings.browser_file[i];
+                    if (c < 0x20 || c > 0x7E) { autoboot_ok = false; break; }
+                }
             }
+            /* The path must be a sane C string too. */
+            size_t p = 0;
+            while (p < sizeof(g_settings.browser_path) && g_settings.browser_path[p]) p++;
+            if (p >= sizeof(g_settings.browser_path)) autoboot_ok = false;
         }
-        /* The path must be a sane C string too. */
-        size_t p = 0;
-        while (p < sizeof(g_settings.browser_path) && g_settings.browser_path[p]) p++;
-        if (p >= sizeof(g_settings.browser_path)) autoboot_ok = false;
-    }
 
 #ifdef AUTOBOOT_PATH
-    /* An explicit path wins over the saved browser position: saved
-     * settings can be corrupt, and a development aid that depends on
-     * them is useless exactly when the board is in a bad state. */
-    if (first_launch) {
-        snprintf(selected_rom, sizeof(selected_rom), "%s", AUTOBOOT_PATH);
-        LOG("Autoboot (fixed): %s\n", selected_rom);
-    } else
+        /* An explicit path wins over the saved browser position: saved
+         * settings can be corrupt, and a development aid that depends on
+         * them is useless exactly when the board is in a bad state. */
+        if (first_launch) {
+            snprintf(selected_rom, sizeof(selected_rom), "%s", AUTOBOOT_PATH);
+            LOG("Autoboot (fixed): %s\n", selected_rom);
+        } else
 #endif
-    if (first_launch && autoboot_ok) {
-        snprintf(selected_rom, sizeof(selected_rom), "%s%s%s",
-                 g_settings.browser_path,
-                 g_settings.browser_path[0] &&
-                 g_settings.browser_path[strlen(g_settings.browser_path) - 1] != '/'
-                     ? "/" : "",
-                 g_settings.browser_file);
-        LOG("Autoboot: %s\n", selected_rom);
-    } else
+        if (first_launch && autoboot_ok) {
+            snprintf(selected_rom, sizeof(selected_rom), "%s%s%s",
+                     g_settings.browser_path,
+                     g_settings.browser_path[0] &&
+                     g_settings.browser_path[strlen(g_settings.browser_path) - 1] != '/'
+                         ? "/" : "",
+                     g_settings.browser_file);
+            LOG("Autoboot: %s\n", selected_rom);
+        } else
 #endif
-    if (!rom_selector_show(selected_rom, sizeof(selected_rom), (uint8_t *)SCREEN)) {
-        LOG("No ROM selected!\n");
-        while (1) {
-            tight_loop_contents();
+        if (!rom_selector_show(selected_rom, sizeof(selected_rom), (uint8_t *)SCREEN)) {
+            LOG("No ROM selected!\n");
+            while (1) {
+                tight_loop_contents();
+            }
         }
-    }
     
-    // Set up Genesis palette after ROM selection
-    setup_genesis_palette();
-    graphics_restore_sync_colors();  // Restore HDMI sync after palette init
+        // Set up Genesis palette after ROM selection
+        setup_genesis_palette();
+        graphics_restore_sync_colors();  // Restore HDMI sync after palette init
     
-    // Load selected ROM
-    LOG("Loading ROM: %s\n", selected_rom);
-    if (!load_rom(selected_rom)) {
-        /* Back to the browser rather than a dead board: the player can
-         * pick something else. */
-        LOG("Failed to load ROM: %s\n", selected_rom);
-        first_launch = false;
-        continue;
-    }
+        // Load selected ROM
+        LOG("Loading ROM: %s\n", selected_rom);
+        if (!load_rom(selected_rom)) {
+            /* Back to the browser rather than a dead board: the player can
+             * pick something else. */
+            LOG("Failed to load ROM: %s\n", selected_rom);
+            first_launch = false;
+            continue;
+        }
     
 #ifdef USE_SOUND_LINK
-    // Hand the ROM to the sound slave. Its Z80 reads the 68K address
-    // space through the bank register, so it needs the whole image, not
-    // just the driver. The buffer is already byte-swapped and the slave
-    // applies the same ^1 on read, so both halves agree.
-    //
-    // Retry the probe first: the master may have booted before the
-    // slave finished its own PSRAM bring-up, and by the time a ROM has
-    // been chosen the slave is certainly up.
-    for (int attempt = 0; attempt < 5 && !link_master_connected(); attempt++) {
-        link_master_probe(200000, NULL);
-    }
-    LOG("Link: probe -> %s\n", link_master_connected() ? "connected" : "no answer");
-
-    if (link_master_connected()) {
-        LOG("Link: uploading %lu KB ROM to slave...\n",
-            (unsigned long)(rom_size_bytes >> 10));
-
-        link_sound_config_t cfg;
-        memset(&cfg, 0, sizeof(cfg));
-        cfg.z80_enabled       = g_settings.z80_enabled;
-        cfg.fm_enabled        = g_settings.fm_sound;
-        cfg.dac_enabled       = CHANNEL_ENABLED(g_settings.channel_mask, 5);
-        cfg.psg_enabled       = CHANNEL_ENABLED(g_settings.channel_mask, 6);
-        cfg.channel_mask      = g_settings.channel_mask;
-        cfg.samples_per_frame = 888;
-
-        /* Remember it so the link can re-prime a slave that reboots or
-         * gets reflashed without the user having to reload the game. */
-        extern void sound_link_set_rom(const uint8_t *, uint32_t,
-                                       const link_sound_config_t *);
-        sound_link_set_rom(ROM_DATA, rom_size_bytes, &cfg);
-
-        if (link_master_upload_rom(ROM_DATA, rom_size_bytes) &&
-            link_master_send_config(&cfg)) {
-            LOG("Link: slave ready\n");
-        } else {
-            LOG("Link: slave setup FAILED - no sound this session\n");
+        // Hand the ROM to the sound slave. Its Z80 reads the 68K address
+        // space through the bank register, so it needs the whole image, not
+        // just the driver. The buffer is already byte-swapped and the slave
+        // applies the same ^1 on read, so both halves agree.
+        //
+        // Retry the probe first: the master may have booted before the
+        // slave finished its own PSRAM bring-up, and by the time a ROM has
+        // been chosen the slave is certainly up.
+        for (int attempt = 0; attempt < 5 && !link_master_connected(); attempt++) {
+            link_master_probe(200000, NULL);
         }
-    } else {
-        LOG("Link: slave down - no sound this session\n");
-    }
-    sound_link_backend_reset();
+        LOG("Link: probe -> %s\n", link_master_connected() ? "connected" : "no answer");
+
+        if (link_master_connected()) {
+            LOG("Link: uploading %lu KB ROM to slave...\n",
+                (unsigned long)(rom_size_bytes >> 10));
+
+            link_sound_config_t cfg;
+            memset(&cfg, 0, sizeof(cfg));
+            cfg.z80_enabled       = g_settings.z80_enabled;
+            cfg.fm_enabled        = g_settings.fm_sound;
+            cfg.dac_enabled       = CHANNEL_ENABLED(g_settings.channel_mask, 5);
+            cfg.psg_enabled       = CHANNEL_ENABLED(g_settings.channel_mask, 6);
+            cfg.channel_mask      = g_settings.channel_mask;
+            cfg.samples_per_frame = 888;
+
+            /* Remember it so the link can re-prime a slave that reboots or
+             * gets reflashed without the user having to reload the game. */
+            extern void sound_link_set_rom(const uint8_t *, uint32_t,
+                                           const link_sound_config_t *);
+            sound_link_set_rom(ROM_DATA, rom_size_bytes, &cfg);
+
+            if (link_master_upload_rom(ROM_DATA, rom_size_bytes) &&
+                link_master_send_config(&cfg)) {
+                LOG("Link: slave ready\n");
+            } else {
+                LOG("Link: slave setup FAILED - no sound this session\n");
+            }
+        } else {
+            LOG("Link: slave down - no sound this session\n");
+        }
+        sound_link_backend_reset();
 #endif
 
-    // Initialize emulator
-    genesis_init();
+        // Initialize emulator
+        genesis_init();
 
-    /* The settings menu mutes every sound chip on its way out, so a game
-     * started from that path would otherwise come up silent. */
-    settings_apply_runtime();
-    audio_set_enabled(g_settings.audio_enabled);
+        /* The settings menu mutes every sound chip on its way out, so a game
+         * started from that path would otherwise come up silent. */
+        settings_apply_runtime();
+        audio_set_enabled(g_settings.audio_enabled);
 
-    first_launch = false;
+        first_launch = false;
 
-    LOG("Starting emulation...\n");
+        LOG("Starting emulation...\n");
 
-    // Run emulation. Returns only when the player chose to leave the
-    // game, at which point we go round again and show the browser.
-    emulation_loop();
+        // Run emulation. Returns only when the player chose to leave the
+        // game, at which point we go round again and show the browser.
+        emulation_loop();
     }
 
     return 0;
